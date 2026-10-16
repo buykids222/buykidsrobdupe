@@ -17,9 +17,8 @@ end
 
 getgenv().BUYKIDS_DUPE_KEY = nil  -- wipe it after check
 
--- === YOUR FULL DUPE SCRIPT BELOW THIS LINE ===
--- ============================================================
---  BUYKIDS DUPE v2.8  |  + Car Body Fling
+-- === YOUR FULL DUPE SCRIPT BELOW THIS LINE ===-- ============================================================
+--  BUYKIDS DUPE v3.0  |  + Car Body Fling  +  Teleport Tab
 -- ============================================================
 
 local Players           = game:GetService("Players")
@@ -90,14 +89,14 @@ local bringOn        = false
 local bringActive    = false
 
 -- ─── CAR FLING STATE ────────────────────────────────────────
-getgenv().carBugEnabled   = false
-getgenv().carBugTarget    = nil
-local carFlingOn          = false   -- UI toggle mirror
-local carFlingHits        = 0       -- session hit counter
-local CAR_FLING_INTERVAL  = 0.18    -- seconds between launch attempts
-local CAR_FLING_H_SPEED   = 18000   -- horizontal fling magnitude
-local CAR_FLING_V_SPEED   = 42000   -- vertical fling magnitude
-local CAR_BV_LIFETIME     = 0.07    -- how long BodyVelocity lives
+-- Mirrored from main script. 50k vertical guarantees anti-fly detection → kick.
+getgenv().carBugEnabled = false
+getgenv().carBugTarget  = nil
+local carFlingOn        = false
+local carFlingHits      = 0
+local CAR_FLING_H_SPEED = 15000   -- horizontal magnitude (matches main script)
+local CAR_FLING_V_SPEED = 50000   -- vertical launch — triggers Roblox anti-fly kick
+local CAR_BV_LIFETIME   = 0.08    -- BodyVelocity lifetime in seconds
 
 -- ─── GUI STATE ──────────────────────────────────────────────
 local activeTab = "DUPE"
@@ -176,102 +175,53 @@ local actionRowRefs = {}
 
 -- ═══════════════════════════════════════════════════════════
 --  CAR BODY FLING ENGINE
+--  Mirrored from main script (auto clean red money bank updated and fling.txt)
+--  Upgraded: task.wait() loop (every frame), 50k V to trigger anti-fly kick
 -- ═══════════════════════════════════════════════════════════
-local function cleanBodyForces(hrp)
-    for _,inst in ipairs(hrp:GetChildren()) do
-        if inst:IsA("BodyVelocity")
-        or inst:IsA("BodyForce")
-        or inst:IsA("BodyAngularVelocity")
-        or inst:IsA("LinearVelocity")
-        or inst:IsA("AngularVelocity") then
-            inst:Destroy()
-        end
-    end
-end
-
--- finds closest unoccupied car in workspace.CivCars
-local function findBestCar(targetHRP)
-    local civCars = workspace:FindFirstChild("CivCars")
-    if not civCars then return nil end
-    local best, bestDist = nil, math.huge
-    for _,car in ipairs(civCars:GetChildren()) do
-        local seat = car:FindFirstChild("DriveSeat")
-        if seat and not seat.Occupant then
-            local primary = car.PrimaryPart
-                or (car:FindFirstChild("Body") and car:FindFirstChild("Body"):FindFirstChild("#Weight"))
-                or car:FindFirstChildOfClass("BasePart")
-            if primary then
-                local dist = (primary.Position - targetHRP.Position).Magnitude
-                if dist < bestDist then best=car; bestDist=dist end
-            end
-        end
-    end
-    return best
-end
-
-local function launchFling(targetHRP)
-    cleanBodyForces(targetHRP)
-    local angle = math.random(0, 359)
-    local hx = math.cos(math.rad(angle)) * CAR_FLING_H_SPEED
-    local hz = math.sin(math.rad(angle)) * CAR_FLING_H_SPEED
-    local bv = Instance.new("BodyVelocity")
-    bv.MaxForce  = Vector3.new(1e9, 1e9, 1e9)
-    bv.Velocity  = Vector3.new(hx, CAR_FLING_V_SPEED, hz)
-    bv.Parent    = targetHRP
-    task.delay(CAR_BV_LIFETIME, function()
-        if bv and bv.Parent then bv:Destroy() end
-    end)
-end
-
 local function startCarFlingLoop(targetPlayer)
     getgenv().carBugEnabled = true
     task.spawn(function()
-        local myChar, myHRP, targetChar, targetHRP, car, driveSeat
+        local pl = Players
+        local lp = pl.LocalPlayer
 
         while getgenv().carBugEnabled do
-            task.wait(CAR_FLING_INTERVAL)
+            task.wait()  -- every frame, no throttle — matches main script
 
-            -- refresh references each cycle — characters respawn
-            myChar = LocalPlayer.Character
-            myHRP  = myChar and myChar:FindFirstChild("HumanoidRootPart")
-            if not myChar or not myHRP then continue end
+            local c = lp.Character
+            if not c or not c:FindFirstChild("HumanoidRootPart") then continue end
 
             -- validate target still in server
-            local tp = Players:FindFirstChild(targetPlayer)
+            local tp = pl:FindFirstChild(targetPlayer)
             if not tp then
-                if AddLog then AddLog("warn","Car Fling: target left the server") end
+                if AddLog then AddLog("warn", "Car Fling: target left the server") end
                 getgenv().carBugEnabled = false
                 if actionRowRefs.carFlingToggleCb then actionRowRefs.carFlingToggleCb(false) end
+                if actionRowRefs.playersPanelCarFlingSync then actionRowRefs.playersPanelCarFlingSync(false) end
                 break
             end
+            if not tp.Character or not tp.Character:FindFirstChild("HumanoidRootPart") then continue end
 
-            targetChar = tp.Character
-            targetHRP  = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
-            if not targetChar or not targetHRP then continue end
-
-            -- find a car
-            car = findBestCar(targetHRP)
+            -- find first unoccupied car in CivCars
+            local civCars = workspace:FindFirstChild("CivCars")
+            if not civCars then continue end
+            local car = nil
+            for _, m in ipairs(civCars:GetChildren()) do
+                if not m:IsA("Model") then continue end
+                local seat = m:FindFirstChild("DriveSeat")
+                if seat and not seat.Occupant then car = m break end
+            end
             if not car then continue end
 
-            driveSeat = car:FindFirstChild("DriveSeat")
+            local driveSeat = car:FindFirstChild("DriveSeat")
             if not driveSeat or driveSeat.Occupant then continue end
 
-            -- ensure primary part set
-            if not car.PrimaryPart then
-                car.PrimaryPart =
-                    (car:FindFirstChild("Body") and car:FindFirstChild("Body"):FindFirstChild("#Weight"))
-                    or car:FindFirstChildOfClass("BasePart")
-            end
-            if not car.PrimaryPart then continue end
-
-            -- sit LocalPlayer if needed to unlock car, then bail immediately
-            local myHum = myChar:FindFirstChildOfClass("Humanoid")
-            if myHum and not driveSeat.Occupant then
-                local usable = car:GetAttribute("Usable")
-                if usable == false then
+            -- unlock car: sit LP to mark usable, then bail immediately
+            if not car:GetAttribute("Usable") or car:GetAttribute("Usable") == false then
+                local myHum = c:FindFirstChildOfClass("Humanoid")
+                if myHum then
                     pcall(function() driveSeat:Sit(myHum) end)
                     car:SetAttribute("Usable", true)
-                    task.wait(0.12)
+                    task.wait(1)
                     pcall(function()
                         myHum:ChangeState(Enum.HumanoidStateType.Jumping)
                         myHum.Jump = true
@@ -281,27 +231,59 @@ local function startCarFlingLoop(targetPlayer)
                 end
             end
 
-            -- teleport car onto target then immediately launch
-            task.wait()  -- yield so physics settles one tick
-            local freshTarget = Players:FindFirstChild(targetPlayer)
+            task.wait()  -- settle one tick before repositioning
+
+            -- re-validate after unlock delay
+            local freshTarget = pl:FindFirstChild(targetPlayer)
             if not freshTarget or not freshTarget.Character then continue end
             local freshHRP = freshTarget.Character:FindFirstChild("HumanoidRootPart")
             if not freshHRP then continue end
 
+            -- ensure PrimaryPart exists
+            if not car.PrimaryPart then
+                local body = car:FindFirstChild("Body")
+                if body then
+                    car.PrimaryPart = body:FindFirstChild("#Weight")
+                        or body:FindFirstChildOfClass("BasePart")
+                end
+                if not car.PrimaryPart then
+                    car.PrimaryPart = car:FindFirstChildOfClass("BasePart")
+                end
+            end
+            if not car.PrimaryPart then continue end
+
+            -- teleport car directly onto target
             pcall(function()
                 car:SetPrimaryPartCFrame(freshHRP.CFrame + Vector3.new(0, 0.5, 0))
             end)
 
-            -- double-tap: two velocity pulses in quick succession for reliability
-            pcall(function() launchFling(freshHRP) end)
-            task.wait(0.04)
-            local stillHRP = freshTarget.Character and freshTarget.Character:FindFirstChild("HumanoidRootPart")
-            if stillHRP then
-                pcall(function() launchFling(stillHRP) end)
+            -- strip any existing forces so nothing fights the launch
+            for _, inst in ipairs(freshHRP:GetChildren()) do
+                if inst:IsA("BodyVelocity")
+                or inst:IsA("BodyForce")
+                or inst:IsA("LinearVelocity")
+                or inst:IsA("BodyAngularVelocity")
+                or inst:IsA("AngularVelocity") then
+                    inst:Destroy()
+                end
             end
 
+            -- LAUNCH:
+            --   15k horizontal (random direction) + 50k vertical
+            --   50k vertical sends target out of map ceiling → Roblox anti-fly kicks them
+            local flingBV        = Instance.new("BodyVelocity")
+            flingBV.MaxForce     = Vector3.new(1e9, 1e9, 1e9)
+            local angle          = math.random(0, 359)
+            local hx             = math.cos(math.rad(angle)) * CAR_FLING_H_SPEED
+            local hz             = math.sin(math.rad(angle)) * CAR_FLING_H_SPEED
+            flingBV.Velocity     = Vector3.new(hx, CAR_FLING_V_SPEED, hz)
+            flingBV.Parent       = freshHRP
+            task.delay(CAR_BV_LIFETIME, function()
+                if flingBV and flingBV.Parent then flingBV:Destroy() end
+            end)
+
             carFlingHits += 1
-            if AddLog then AddLog("ok","Car fling hit #"..carFlingHits.." → "..targetPlayer) end
+            if AddLog then AddLog("ok", "Fling #"..carFlingHits.." → "..targetPlayer) end
             if actionRowRefs.carFlingHitLabel then
                 actionRowRefs.carFlingHitLabel.Text = "HITS: "..carFlingHits
             end
@@ -557,7 +539,7 @@ local TitleBar=MakeFrame({
     Size=UDim2.new(1,0,0,32),Position=UDim2.new(0,0,0,2),
     BackgroundColor3=Color3.fromRGB(14,6,5),
 },Win)
-MakeLabel({Size=UDim2.new(1,-90,1,0),Position=UDim2.new(0,12,0,0),Text="⬡  BUYKIDS DUPE  v2.8",TextSize=12,ZIndex=5},TitleBar)
+MakeLabel({Size=UDim2.new(1,-90,1,0),Position=UDim2.new(0,12,0,0),Text="⬡  BUYKIDS DUPE  v3.0",TextSize=12,ZIndex=5},TitleBar)
 local CloseBtn=MakeButton({Size=UDim2.new(0,24,0,20),Position=UDim2.new(1,-28,0.5,-10),Text="✕",TextSize=12,BackgroundColor3=Color3.fromRGB(60,10,8),TextColor3=C.Accent,ZIndex=10},TitleBar)
 Corner(CloseBtn,3)
 local MinBtn=MakeButton({Size=UDim2.new(0,24,0,20),Position=UDim2.new(1,-56,0.5,-10),Text="−",TextSize=14,BackgroundColor3=C.Card,TextColor3=C.TextSec,ZIndex=10},TitleBar)
@@ -572,7 +554,9 @@ local CountLabel=MakeLabel({Size=UDim2.new(0,100,1,0),Position=UDim2.new(1,-106,
 
 local TabBar=MakeFrame({Size=UDim2.new(1,0,0,26),Position=UDim2.new(0,0,0,58),BackgroundColor3=Color3.fromRGB(12,12,16)},Win)
 Stroke(TabBar,C.Border,1)
-local TABS={"DUPE","RAINBOW","MARKET","SETTINGS","BLACKLIST"}
+
+-- BLACKLIST replaced with TELEPORT
+local TABS = {"DUPE","RAINBOW","MARKET","SETTINGS","TELEPORT"}
 local TabBtns={}
 for i,name in ipairs(TABS) do
     local w=1/#TABS
@@ -594,7 +578,7 @@ local function SecLabel(text,parent,yPos)
 end
 
 -- ═══════════════════════════════════════════════════════════
---  PLAYER DROPDOWN
+--  PLAYER DROPDOWN COMPONENT
 -- ═══════════════════════════════════════════════════════════
 local function MakePlayerDropdown(parent,yPos,onSelect)
     local DROPDOWN_H=32; local LIST_ITEM_H=28; local MAX_VISIBLE=6
@@ -697,8 +681,10 @@ local playerDropdown=MakePlayerDropdown(DupeContainer,106,function(name)
 end)
 
 -- ── ACTION HELPERS ───────────────────────────────────────────
-local function ActionToggle(label,icon,yPos,colorOn,onToggle)
-    local row=MakeFrame({Size=UDim2.new(1,-24,0,34),Position=UDim2.new(0,12,0,yPos),BackgroundColor3=C.Card},DupeContainer)
+-- container param defaults to DupeContainer for backward compat
+local function ActionToggle(label,icon,yPos,colorOn,onToggle,container)
+    container = container or DupeContainer
+    local row=MakeFrame({Size=UDim2.new(1,-24,0,34),Position=UDim2.new(0,12,0,yPos),BackgroundColor3=C.Card},container)
     Corner(row,4); Stroke(row,C.Border,1)
     MakeLabel({Size=UDim2.new(0,22,1,0),Position=UDim2.new(0,8,0,0),Text=icon,TextSize=14,TextXAlignment=Enum.TextXAlignment.Center},row)
     MakeLabel({Size=UDim2.new(1,-100,1,0),Position=UDim2.new(0,34,0,0),Text=label,TextSize=11,Font=Enum.Font.GothamBold,TextColor3=C.TextSec},row)
@@ -727,8 +713,9 @@ local function ActionToggle(label,icon,yPos,colorOn,onToggle)
     return setState
 end
 
-local function ActionButton(label,icon,btnText,btnColor,yPos,extraLabel,onClick)
-    local row=MakeFrame({Size=UDim2.new(1,-24,0,34),Position=UDim2.new(0,12,0,yPos),BackgroundColor3=C.Card},DupeContainer)
+local function ActionButton(label,icon,btnText,btnColor,yPos,extraLabel,onClick,container)
+    container = container or DupeContainer
+    local row=MakeFrame({Size=UDim2.new(1,-24,0,34),Position=UDim2.new(0,12,0,yPos),BackgroundColor3=C.Card},container)
     Corner(row,4); Stroke(row,C.Border,1)
     MakeLabel({Size=UDim2.new(0,22,1,0),Position=UDim2.new(0,8,0,0),Text=icon,TextSize=14,TextXAlignment=Enum.TextXAlignment.Center},row)
     MakeLabel({Size=UDim2.new(1,-150,1,0),Position=UDim2.new(0,34,0,0),Text=label,TextSize=11,Font=Enum.Font.GothamBold,TextColor3=C.TextSec},row)
@@ -769,25 +756,21 @@ actionRowRefs.bringToggleCb=function(v) setBring(v,true) end
 ActionButton("View Inventory","🎒","VIEW",C.Blue,252,nil,function() doViewInventory() end)
 
 -- ── CAR BODY FLING ROW ──────────────────────────────────────
--- custom wider row: toggle + hit counter
 local carRow=MakeFrame({Size=UDim2.new(1,-24,0,46),Position=UDim2.new(0,12,0,294),BackgroundColor3=C.Card},DupeContainer)
 Corner(carRow,4); Stroke(carRow,C.Border,1)
 
--- icon + label
 MakeLabel({Size=UDim2.new(0,22,0,22),Position=UDim2.new(0,8,0.5,-11),Text="🚗",TextSize=15,TextXAlignment=Enum.TextXAlignment.Center},carRow)
 MakeLabel({Size=UDim2.new(1,-160,0,18),Position=UDim2.new(0,34,0,5),Text="Car Body Fling",TextSize=11,Font=Enum.Font.GothamBold,TextColor3=C.TextSec},carRow)
 
--- hit counter label (updated by loop)
 local carHitLbl=MakeLabel({
     Size=UDim2.new(0,70,0,12),Position=UDim2.new(0,34,0,27),
     Text="HITS: 0",TextSize=8,Font=Enum.Font.Code,TextColor3=C.TextDim,
 },carRow)
 actionRowRefs.carFlingHitLabel=carHitLbl
 
--- speed sub-label
-MakeLabel({Size=UDim2.new(1,-160,0,12),Position=UDim2.new(0,108,0,27),Text="18k H · 42k V · 0.18s cycle",TextSize=7,Font=Enum.Font.Gotham,TextColor3=C.TextDim},carRow)
+-- updated spec label: mirrors main script, 50k V for anti-fly kick
+MakeLabel({Size=UDim2.new(1,-160,0,12),Position=UDim2.new(0,108,0,27),Text="15k H · 50k V · max rate → kick",TextSize=7,Font=Enum.Font.Gotham,TextColor3=C.Accent},carRow)
 
--- pill toggle
 local carPillBg=MakeFrame({Size=UDim2.new(0,44,0,22),Position=UDim2.new(1,-54,0.5,-11),BackgroundColor3=C.Input},carRow)
 Corner(carPillBg,11); Stroke(carPillBg,C.Border,1)
 local carPillNub=MakeFrame({Size=UDim2.new(0,16,0,16),Position=UDim2.new(0,3,0.5,-8),BackgroundColor3=C.White},carPillBg)
@@ -816,10 +799,10 @@ local function setCarFlingUI(v,silent)
             end
             carFlingHits=0; carHitLbl.Text="HITS: 0"
             startCarFlingLoop(getgenv().carBugTarget)
-            if AddLog then AddLog("info","Car fling started → "..tostring(getgenv().carBugTarget)) end
+            if AddLog then AddLog("info","Car fling → "..tostring(getgenv().carBugTarget)) end
         else
             stopCarFling()
-            if AddLog then AddLog("info","Car fling stopped — "..carFlingHits.." total hits") end
+            if AddLog then AddLog("warn","Car fling stopped — "..carFlingHits.." hits") end
         end
     end
 end
@@ -872,7 +855,7 @@ AddLog=function(t,msg)
         LogScroll.CanvasPosition=Vector2.new(0,math.max(0,LogScroll.AbsoluteCanvasSize.Y-LogScroll.AbsoluteSize.Y))
     end)
 end
-AddLog("info","BuyKids Dupe v2.8 ready.")
+AddLog("info","BuyKids Dupe v3.0 ready.")
 
 -- ═══════════════════════════════════════════════════════════
 --  PANEL: RAINBOW
@@ -996,36 +979,301 @@ SettingRow("List Price",         "Robux price for market listings",   "number",9
 SettingRow("Auto Re-Equip",      "Re-equip masterObject each cycle",  "toggle",true,   "AutoReEquip")
 
 -- ═══════════════════════════════════════════════════════════
---  PANEL: BLACKLIST
+--  TELEPORT HELPERS
 -- ═══════════════════════════════════════════════════════════
-local BlacklistPanel=NewPanel("BLACKLIST")
-local BLScroll=Make("ScrollingFrame",{Size=UDim2.new(1,0,1,-46),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=3,ScrollBarImageColor3=C.Border,CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y},BlacklistPanel)
-Make("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=BLScroll}); Pad(BLScroll,8,4,12,12)
-local BLAddRow=MakeFrame({Size=UDim2.new(1,0,0,40),Position=UDim2.new(0,0,1,-40),BackgroundColor3=Color3.fromRGB(10,10,14)},BlacklistPanel)
-Stroke(BLAddRow,C.Border,1)
-local BLInput=MakeInput({Size=UDim2.new(1,-74,0,26),Position=UDim2.new(0,10,0.5,-13),PlaceholderText="Item name (exact match)",Text="",TextSize=11,ClearTextOnFocus=false},BLAddRow)
-Corner(BLInput,3); Stroke(BLInput,C.Border,1); Pad(BLInput,0,0,8,8)
-local BLAddBtn=MakeButton({Size=UDim2.new(0,52,0,26),Position=UDim2.new(1,-62,0.5,-13),Text="ADD",TextSize=10,Font=Enum.Font.GothamBold},BLAddRow)
-Corner(BLAddBtn,3); Stroke(BLAddBtn,C.BorderAcc,1)
-local function RenderBL()
-    for _,v in pairs(BLScroll:GetChildren()) do if v:IsA("Frame") then v:Destroy() end end
-    for name in pairs(CFG.Blacklist) do
-        local row=MakeFrame({Size=UDim2.new(1,0,0,30),BackgroundColor3=C.Card,LayoutOrder=1},BLScroll)
-        Corner(row,3); Stroke(row,C.Border,1)
-        MakeFrame({Size=UDim2.new(0,4,0,4),Position=UDim2.new(0,10,0.5,-2),BackgroundColor3=C.Accent},row)
-        MakeLabel({Size=UDim2.new(1,-50,1,0),Position=UDim2.new(0,22,0,0),Text=name,TextSize=11,Font=Enum.Font.GothamBold,TextColor3=C.TextSec},row)
-        local rm=MakeButton({Size=UDim2.new(0,22,0,22),Position=UDim2.new(1,-30,0.5,-11),Text="✕",TextSize=10,BackgroundColor3=C.BG,TextColor3=C.TextDim},row)
-        Corner(rm,3)
-        rm.MouseButton1Click:Connect(function() CFG.Blacklist[name]=nil; RenderBL() end)
-        rm.MouseEnter:Connect(function() rm.TextColor3=C.Accent end)
-        rm.MouseLeave:Connect(function() rm.TextColor3=C.TextDim end)
+local function BypassTP(cf)
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hum or not hrp then return end
+    getgenv().SwimMethod = true
+    hum:ChangeState(0)
+    repeat task.wait(0.0001) until not LocalPlayer:GetAttribute("LastACPos")
+    hrp.CFrame = cf
+    task.wait(0.1)
+    hum:ChangeState(2)
+    getgenv().SwimMethod = false
+end
+
+-- ─── LOCATIONS (mirrored from main script) ──────────────────
+local locations = {
+    ["💸 Bail Player Spot"]    = Vector3.new(-1206.54, 253.89, -3342.74),
+    ["💳 Bank"]                = Vector3.new(-1216.63, 253.88, -3634.77),
+    ["🏚️ Money Wash"]          = Vector3.new(-376.18, 253.68, -1975.59),
+    ["🪙 Safe Items"]          = Vector3.new(68514.90, 52941.50, -796.09),
+    ["💎 Pawn Shop"]           = Vector3.new(-1049.64, 253.54, -818.27),
+    ["🔒 Bank Vault"]          = Vector3.new(-217.57, 373.80, -1216.21),
+    ["💵 Mr Money Man"]        = Vector3.new(-1008.69, 262.33, 54.57),
+    ["💥 GunShop 1"]           = Vector3.new(92959.87, 122098.50, 17244.46),
+    ["🏠 GunShop 1 Lobby"]     = Vector3.new(-1002.42, 253.64, -1441.91),
+    ["🎯 GunShop 2"]           = Vector3.new(66195.45, 123615.71, 5750.28),
+    ["🚪 GunShop 2 Lobby"]     = Vector3.new(-224.38, 283.80, -794.72),
+    ["🔫 GunShop 3"]           = Vector3.new(60819.88, 87609.15, -351.47),
+    ["🔫 GunShop 4"]           = Vector3.new(72421.91, 128855.82, -1080.61),
+    ["🏙️ Pent House"]          = Vector3.new(-178.27, 397.14, -573.03),
+    ["🍃☕ Pent House 2"]       = Vector3.new(-618.03, 356.55, -681.40),
+    ["🏡 Mini Mansion"]        = Vector3.new(-791.52, 256.79, 1414.42),
+    ["🏠 Roof"]                = Vector3.new(-381.65, 463.69, -706.36),
+    ["🧳 Backpack Shop"]       = Vector3.new(-713.97, 253.92, -693.49),
+    ["💠 Frozen Shop"]         = Vector3.new(-216.31, 284.03, -1169.03),
+    ["💦 Drip Shop"]           = Vector3.new(67462.70, 10489.04, 549.59),
+    ["🍗 Chicken Wings"]       = Vector3.new(-1157.91, 253.54, -815.94),
+    ["🥪 Deli"]                = Vector3.new(-755.81, 254.69, -687.12),
+    ["🚙 Car Dealer"]          = Vector3.new(-401.99, 253.41, -1248.84),
+    ["🥤 Soda Warehouse"]      = Vector3.new(-187.86, 284.63, -291.34),
+    ["🍾 Soda Supplies"]       = Vector3.new(51372.82, 21680.42, 5840.86),
+    ["🍹 Soda Seller"]         = Vector3.new(-1292.22, 253.30, -3003.05),
+    ["🐊 Exotic Dealer"]       = Vector3.new(-1523.57, 273.97, -990.66),
+    ["⚙️ Switch Seller"]       = Vector3.new(-1446.22, 256.06, 2189.88),
+    ["🏦 Bank Tools"]          = Vector3.new(-397.43, 334.31, -555.70),
+    ["🏗️ Construction Site"]   = Vector3.new(-1731.83, 370.81, -1176.84),
+    ["🚓 Prison"]              = Vector3.new(-1135.05, 254.72, -3330.00),
+    ["🍔 Popeyeas"]            = Vector3.new(-71.81, 283.64, -769.44),
+    ["🧊 Ice Box"]             = Vector3.new(-215.14, 283.52, -1258.69),
+    ["🏥 Hospital"]            = Vector3.new(-1589.50, 254.27, 17.66),
+    ["🛒 MarGreens"]           = Vector3.new(-381.21, 254.45, -385.67),
+    ["🕵️ Feds Room"]           = Vector3.new(-1441.79, 255.04, -3132.60),
+    ["💰 ATM 1"]               = Vector3.new(-1043.47, 254.83, -1127.02),
+    ["💵 ATM 2"]               = Vector3.new(-738.26, 253.76, -787.86),
+    ["🏧 ATM 3"]               = Vector3.new(-96.72, 283.63, -766.33),
+    ["🏠 House Rob"]           = Vector3.new(-613.05, 254.07, -730.71),
+    ["🎬 Studio Robbery"]      = Vector3.new(93427.52, 14484.91, 566.67),
+    ["🏘️ TrailerPark"]         = Vector3.new(-1522.77, 253.16, 2344.96),
+    ["🏨 Woody's Hotel"]       = Vector3.new(-1022.62, 325.84, -908.92),
+    ["🏙️ 600 Block"]           = Vector3.new(-990.68, 253.71, -281.32),
+    ["🎵 Marleys Studio"]      = Vector3.new(-1554.91, 280.95, -1019.51),
+    ["📱 T-Mobile"]            = Vector3.new(-679.19, 253.67, -698.56),
+    ["🍕 Lil Caesars"]         = Vector3.new(-611.52, 254.31, -800.34),
+    ["🌮 Taco Shop"]           = Vector3.new(-672.70, 253.83, -807.84),
+    ["🍔 Burger n Fries"]      = Vector3.new(-750.63, 253.76, -784.57),
+    ["🏚️ Cookin House"]        = Vector3.new(-1605.92, 254.04, -488.44),
+}
+
+local orderedLocations = {
+    "💸 Bail Player Spot",
+    "💥 GunShop 1","🏠 GunShop 1 Lobby","🎯 GunShop 2","🚪 GunShop 2 Lobby",
+    "🔫 GunShop 3","🔫 GunShop 4",
+    "💳 Bank","🔒 Bank Vault","🏦 Bank Tools","💰 ATM 1","💵 ATM 2","🏧 ATM 3","🏚️ Money Wash",
+    "🏙️ Pent House","🍃☕ Pent House 2","🏡 Mini Mansion","🏠 Roof",
+    "🪙 Safe Items","💎 Pawn Shop","🧳 Backpack Shop","💠 Frozen Shop","💦 Drip Shop",
+    "🍗 Chicken Wings","🥪 Deli","🚙 Car Dealer","🥤 Soda Warehouse","🍾 Soda Supplies","🍹 Soda Seller",
+    "🐊 Exotic Dealer","⚙️ Switch Seller","🏗️ Construction Site","🚓 Prison","🍔 Popeyeas",
+    "🧊 Ice Box","🏥 Hospital","🛒 MarGreens","🕵️ Feds Room",
+    "🏠 House Rob","🎬 Studio Robbery","🏘️ TrailerPark","🏨 Woody's Hotel","🏙️ 600 Block",
+    "🎵 Marleys Studio","📱 T-Mobile","🍕 Lil Caesars","🌮 Taco Shop","🍔 Burger n Fries",
+    "💵 Mr Money Man","🏚️ Cookin House",
+}
+
+-- ═══════════════════════════════════════════════════════════
+--  PANEL: TELEPORT  (replaces BLACKLIST)
+-- ═══════════════════════════════════════════════════════════
+local TeleportPanel = NewPanel("TELEPORT")
+
+-- scrollable list of location buttons
+local TpScroll = Make("ScrollingFrame", {
+    Size = UDim2.new(1, 0, 1, -54),
+    Position = UDim2.new(0, 0, 0, 54),
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    ScrollBarThickness = 3,
+    ScrollBarImageColor3 = C.Border,
+    CanvasSize = UDim2.new(0, 0, 0, 0),
+    AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    ScrollingDirection = Enum.ScrollingDirection.Y,
+}, TeleportPanel)
+Make("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 4), Parent = TpScroll})
+Pad(TpScroll, 6, 8, 10, 10)
+
+-- header bar with dropdown + GO button
+local TpHeaderBg = MakeFrame({
+    Size = UDim2.new(1, 0, 0, 50),
+    Position = UDim2.new(0, 0, 0, 0),
+    BackgroundColor3 = Color3.fromRGB(10, 10, 14),
+}, TeleportPanel)
+Stroke(TpHeaderBg, C.Border, 1)
+
+local selectedLocation = orderedLocations[1]
+local TpDropBg = MakeButton({
+    Size = UDim2.new(1, -90, 0, 30),
+    Position = UDim2.new(0, 8, 0, 10),
+    Text = "", BackgroundColor3 = C.Card, ZIndex = 5,
+}, TpHeaderBg)
+Corner(TpDropBg, 4); Stroke(TpDropBg, C.Border, 1)
+MakeLabel({Size=UDim2.new(0,20,1,0),Position=UDim2.new(0,8,0,0),Text="📍",TextSize=13,TextXAlignment=Enum.TextXAlignment.Center,ZIndex=6},TpDropBg)
+local TpDropText = MakeLabel({
+    Size = UDim2.new(1, -52, 1, 0),
+    Position = UDim2.new(0, 30, 0, 0),
+    Text = selectedLocation,
+    TextSize = 10, Font = Enum.Font.GothamBold,
+    TextColor3 = C.TextSec, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 6,
+}, TpDropBg)
+local TpDropChev = MakeLabel({Size=UDim2.new(0,16,1,0),Position=UDim2.new(1,-18,0,0),Text="▾",TextSize=11,TextColor3=C.TextDim,TextXAlignment=Enum.TextXAlignment.Center,ZIndex=6},TpDropBg)
+
+local TpGoBtn = MakeButton({
+    Size = UDim2.new(0, 70, 0, 30),
+    Position = UDim2.new(1, -78, 0, 10),
+    Text = "▶ GO", TextSize = 11, Font = Enum.Font.GothamBold,
+    BackgroundColor3 = C.Accent, TextColor3 = C.White,
+}, TpHeaderBg)
+Corner(TpGoBtn, 4)
+TpGoBtn.MouseEnter:Connect(function() TweenService:Create(TpGoBtn,TweenInfo.new(0.1),{BackgroundColor3=Color3.fromRGB(255,70,55)}):Play() end)
+TpGoBtn.MouseLeave:Connect(function() TweenService:Create(TpGoBtn,TweenInfo.new(0.1),{BackgroundColor3=C.Accent}):Play() end)
+
+-- inline dropdown list (appears below header)
+local TpListFrame = Make("Frame", {
+    Size = UDim2.new(1, -20, 0, 0),
+    Position = UDim2.new(0, 10, 0, 54),
+    BackgroundColor3 = C.DropBG,
+    BorderSizePixel = 0,
+    ClipsDescendants = true,
+    Visible = false,
+    ZIndex = 30,
+}, TeleportPanel)
+Corner(TpListFrame, 4); Stroke(TpListFrame, C.BorderAcc, 1)
+local TpListScroll = Make("ScrollingFrame", {
+    Size = UDim2.new(1, 0, 1, 0),
+    BackgroundTransparency = 1, BorderSizePixel = 0,
+    ScrollBarThickness = 3, ScrollBarImageColor3 = C.Border,
+    CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    ScrollingDirection = Enum.ScrollingDirection.Y, ZIndex = 31,
+}, TpListFrame)
+Make("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 1), Parent = TpListScroll})
+
+local tpDropOpen = false
+local LIST_ITEM_H = 26
+local MAX_DROP_H  = 200
+
+local function closeTpDrop()
+    tpDropOpen = false; TpDropChev.Text = "▾"
+    TweenService:Create(TpListFrame, TweenInfo.new(0.12), {Size=UDim2.new(1,-20,0,0)}):Play()
+    task.delay(0.13, function() TpListFrame.Visible = false end)
+    Stroke(TpDropBg, C.Border, 1)
+end
+
+local function buildTpList()
+    for _, v in pairs(TpListScroll:GetChildren()) do
+        if v:IsA("TextButton") then v:Destroy() end
+    end
+    for idx, name in ipairs(orderedLocations) do
+        local btn = MakeButton({
+            Size = UDim2.new(1, 0, 0, LIST_ITEM_H),
+            Text = "", LayoutOrder = idx, ZIndex = 32,
+            BackgroundColor3 = name == selectedLocation
+                and Color3.fromRGB(40, 14, 12) or C.DropBG,
+        }, TpListScroll)
+        local dot = MakeFrame({Size=UDim2.new(0,4,0,4),Position=UDim2.new(0,8,0.5,-2),BackgroundColor3=name==selectedLocation and C.Accent or C.DropBG,ZIndex=33},btn)
+        Corner(dot, 2)
+        MakeLabel({
+            Size = UDim2.new(1, -20, 1, 0), Position = UDim2.new(0, 16, 0, 0),
+            Text = name, TextSize = 10, Font = Enum.Font.GothamBold,
+            TextColor3 = name == selectedLocation and C.Accent or C.TextSec,
+            TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 33,
+        }, btn)
+        btn.MouseEnter:Connect(function()
+            if name ~= selectedLocation then
+                TweenService:Create(btn,TweenInfo.new(0.08),{BackgroundColor3=C.DropHover}):Play()
+            end
+        end)
+        btn.MouseLeave:Connect(function()
+            if name ~= selectedLocation then
+                TweenService:Create(btn,TweenInfo.new(0.08),{BackgroundColor3=C.DropBG}):Play()
+            end
+        end)
+        btn.MouseButton1Click:Connect(function()
+            selectedLocation = name
+            TpDropText.Text = name
+            TpDropText.TextColor3 = C.TextPri
+            closeTpDrop()
+            buildTpList()
+        end)
     end
 end
-RenderBL()
-BLAddBtn.MouseButton1Click:Connect(function()
-    local v=BLInput.Text:match("^%s*(.-)%s*$")
-    if v and #v>0 then CFG.Blacklist[v]=true; BLInput.Text=""; RenderBL() end
+buildTpList()
+
+TpDropBg.MouseButton1Click:Connect(function()
+    if tpDropOpen then
+        closeTpDrop()
+    else
+        tpDropOpen = true; TpDropChev.Text = "▴"
+        buildTpList()
+        TpListFrame.Visible = true; TpListFrame.Size = UDim2.new(1,-20,0,0)
+        Stroke(TpDropBg, C.BorderAcc, 1)
+        TweenService:Create(TpListFrame, TweenInfo.new(0.15), {
+            Size = UDim2.new(1,-20,0,math.min(#orderedLocations,MAX_DROP_H//LIST_ITEM_H)*LIST_ITEM_H+4)
+        }):Play()
+    end
 end)
+
+TpGoBtn.MouseButton1Click:Connect(function()
+    local vec = locations[selectedLocation]
+    if not vec then
+        AddLog("warn", "TP: location not found — " .. selectedLocation)
+        return
+    end
+    task.spawn(function()
+        BypassTP(CFrame.new(vec))
+        AddLog("ok", "TP → " .. selectedLocation)
+    end)
+end)
+
+-- ── Location button grid (quick access tiles) ────────────────
+SecLabel("Quick Locations", TeleportPanel, 54)  -- section header sits under the header bar
+
+for _, name in ipairs(orderedLocations) do
+    local vec = locations[name]
+    if not vec then continue end
+
+    local tile = MakeFrame({
+        Size = UDim2.new(1, 0, 0, 34),
+        BackgroundColor3 = C.Card,
+        LayoutOrder = 1,
+    }, TpScroll)
+    Corner(tile, 4); Stroke(tile, C.Border, 1)
+
+    -- location name
+    MakeLabel({
+        Size = UDim2.new(1, -80, 1, 0),
+        Position = UDim2.new(0, 10, 0, 0),
+        Text = name,
+        TextSize = 10, Font = Enum.Font.GothamBold,
+        TextColor3 = C.TextSec,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    }, tile)
+
+    -- TP button
+    local tpBtn = MakeButton({
+        Size = UDim2.new(0, 52, 0, 22),
+        Position = UDim2.new(1, -60, 0.5, -11),
+        Text = "TP", TextSize = 10, Font = Enum.Font.GothamBold,
+        BackgroundColor3 = C.AccentDim, TextColor3 = C.Accent,
+    }, tile)
+    Corner(tpBtn, 3); Stroke(tpBtn, C.BorderAcc, 1)
+    tpBtn.MouseEnter:Connect(function()
+        TweenService:Create(tpBtn,TweenInfo.new(0.1),{BackgroundColor3=C.Accent,TextColor3=C.White}):Play()
+    end)
+    tpBtn.MouseLeave:Connect(function()
+        TweenService:Create(tpBtn,TweenInfo.new(0.1),{BackgroundColor3=C.AccentDim,TextColor3=C.Accent}):Play()
+    end)
+
+    local locName = name  -- capture for closure
+    local locVec  = vec
+    tpBtn.MouseButton1Click:Connect(function()
+        -- also update the header dropdown to match
+        selectedLocation = locName
+        TpDropText.Text  = locName
+        TpDropText.TextColor3 = C.TextPri
+        task.spawn(function()
+            BypassTP(CFrame.new(locVec))
+            AddLog("ok", "TP → " .. locName)
+        end)
+        -- flash tile border green as feedback
+        local flash = Instance.new("UIStroke"); flash.Color=C.Green; flash.Thickness=1; flash.Parent=tile
+        task.delay(0.5, function() flash:Destroy(); Stroke(tile,C.Border,1) end)
+    end)
+end
+
+-- ── Blacklist still respected by dupe engine (edit CFG.Blacklist at top) ──
 
 -- ═══════════════════════════════════════════════════════════
 --  TAB SWITCHING
@@ -1062,6 +1310,7 @@ UserInputService.InputBegan:Connect(function(input,gp)
     if gp then return end
     if input.KeyCode==Enum.KeyCode.RightShift then
         playerDropdown.refresh()
+        playerDropdownPlayers.refresh()
         AddLog("info","Refreshed — "..tostring(#buildPlayerList()-1).." player(s)")
     end
 end)
