@@ -1,0 +1,1221 @@
+local KEYS = {
+    "BUYKIDS-dupe-001",
+    "BUYKIDS-dupe-002",
+    "BUYKIDS-dupe-003",
+    -- add more as you hand them out
+}
+
+local inputKey = tostring(getgenv().BUYKIDS_DUPE_KEY or "")
+local authorized = false
+for _, k in ipairs(KEYS) do
+    if k == inputKey then authorized = true; break end
+end
+
+if not authorized then
+    error("\n\n[BuyKids Dupe] Invalid key.\nSet your key first:\n  getgenv().BUYKIDS_DUPE_KEY = \"BUYKIDS-dupe-001\"\n", 0)
+end
+
+getgenv().BUYKIDS_DUPE_KEY = nil  -- wipe it after check
+
+-- === YOUR FULL DUPE SCRIPT BELOW THIS LINE ===
+-- ============================================================
+--  BUYKIDS DUPE v2.8  |  + Car Body Fling
+-- ============================================================
+
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService      = game:GetService("TweenService")
+local UserInputService  = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- ─── REMOTES ────────────────────────────────────────────────
+local ListWeaponRemote = ReplicatedStorage:FindFirstChild("ListWeaponRemote")
+local BackpackRemote   = ReplicatedStorage:FindFirstChild("BackpackRemote")
+
+-- ─── CONFIG ─────────────────────────────────────────────────
+local CFG = {
+    ListDelay     = 0.22,
+    StoreWait     = 3.6,
+    CycleCooldown = 1.5,
+    GrabWait      = 0.5,
+    EquipWait     = 1.0,
+    ListPrice     = 999999,
+    AutoReEquip   = true,
+    Blacklist = {
+        ["Fists"]=true,["Fist"]=true,["Phone"]=true,
+        ["Car Keys"]=true,["Bandage"]=true,["762s"]=true,
+        ["556s"]=true,["Extended"]=true,["T shirt"]=true,
+        ["Combat"]=true,["Weight"]=true,
+    },
+}
+
+-- ─── SHOP MAP ───────────────────────────────────────────────
+local shopGUIs = {
+    ["Bronx Market"]   = "Bronx Market 2",
+    ["Tattoo Shop"]    = "Bronx TATTOOS",
+    ["Open Trunk"]     = "TRUNK STORAGE",
+    ["BRONX PAWNING"]  = "Bronx PAWNING",
+    ["BRONX CLOTHING"] = "Bronx CLOTHING",
+    ["Gas Station"]    = "ShopGUI",
+    ["EXOTIC DEALER"]  = "ThaShop",
+}
+local shopList = {}
+for k in pairs(shopGUIs) do table.insert(shopList, k) end
+table.sort(shopList)
+
+-- ─── DUPE STATE ─────────────────────────────────────────────
+local DupeActive          = false
+local currentSession      = 0
+local masterObject        = nil
+local GhostCache          = nil
+local totalStored         = 0
+local dupeBatchCount      = 0
+local dupeTimer           = 0
+local previousMarketCount = 0
+local PERMANENT_IDS       = {}
+local statCycles          = 0
+local sessionStart        = nil
+
+-- ─── RAINBOW STATE ──────────────────────────────────────────
+getgenv().activeRainbowThreads = getgenv().activeRainbowThreads or {}
+getgenv().rainbowConnections   = getgenv().rainbowConnections   or {}
+getgenv().originalStates       = getgenv().originalStates       or {}
+local rainbowOn = false
+
+-- ─── PLAYER / ACTION STATE ──────────────────────────────────
+local SelectedPlayer = nil
+local spectateOn     = false
+local bringOn        = false
+local bringActive    = false
+
+-- ─── CAR FLING STATE ────────────────────────────────────────
+getgenv().carBugEnabled   = false
+getgenv().carBugTarget    = nil
+local carFlingOn          = false   -- UI toggle mirror
+local carFlingHits        = 0       -- session hit counter
+local CAR_FLING_INTERVAL  = 0.18    -- seconds between launch attempts
+local CAR_FLING_H_SPEED   = 18000   -- horizontal fling magnitude
+local CAR_FLING_V_SPEED   = 42000   -- vertical fling magnitude
+local CAR_BV_LIFETIME     = 0.07    -- how long BodyVelocity lives
+
+-- ─── GUI STATE ──────────────────────────────────────────────
+local activeTab = "DUPE"
+local logLines  = {}
+local MAX_LOG   = 18
+
+-- ═══════════════════════════════════════════════════════════
+--  UTILITY
+-- ═══════════════════════════════════════════════════════════
+local function GetItemCount(name)
+    local n = 0
+    local bp = LocalPlayer:FindFirstChild("Backpack")
+    if bp then for _,v in pairs(bp:GetChildren()) do if v.Name==name then n+=1 end end end
+    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild(name) then n+=1 end
+    return n
+end
+
+local function GetMarketCount(toolName)
+    local n, market = 0, ReplicatedStorage:FindFirstChild("MarketItems")
+    if market then
+        for _,item in ipairs(market:GetChildren()) do
+            if item.Name==toolName
+            and item:FindFirstChild("owner")
+            and item.owner.Value==LocalPlayer.Name then n+=1 end
+        end
+    end
+    return n
+end
+
+local function RestoreGhostItems()
+    local bp, char = LocalPlayer:FindFirstChild("Backpack"), LocalPlayer.Character
+    if not bp or not GhostCache then return end
+    pcall(function()
+        if GhostCache.Parent~=bp and GhostCache.Parent~=char then GhostCache.Parent=bp end
+    end)
+end
+
+local function CollectExisting()
+    local market = ReplicatedStorage:FindFirstChild("MarketItems")
+    if market then
+        for _,item in ipairs(market:GetChildren()) do
+            if item:FindFirstChild("owner") and item.owner.Value==LocalPlayer.Name then
+                local id = item:GetAttribute("SpecialId") or item:GetAttribute("UUID")
+                if id then PERMANENT_IDS[id]=true end
+            end
+        end
+    end
+end
+CollectExisting()
+
+local function FormatTime(s)
+    return string.format("%d:%02d", math.floor(s/60), s%60)
+end
+
+local function getPlayerByName(name)
+    for _,p in ipairs(Players:GetPlayers()) do
+        if p.Name==name or p.DisplayName==name then return p end
+    end
+    return nil
+end
+
+local function buildPlayerList()
+    local list = {"None"}
+    for _,p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then
+            table.insert(list, p.DisplayName~=p.Name
+                and p.Name.." ("..p.DisplayName..")"
+                or p.Name)
+        end
+    end
+    return list
+end
+
+local AddLog  -- forward ref
+local actionRowRefs = {}
+
+-- ═══════════════════════════════════════════════════════════
+--  CAR BODY FLING ENGINE
+-- ═══════════════════════════════════════════════════════════
+local function cleanBodyForces(hrp)
+    for _,inst in ipairs(hrp:GetChildren()) do
+        if inst:IsA("BodyVelocity")
+        or inst:IsA("BodyForce")
+        or inst:IsA("BodyAngularVelocity")
+        or inst:IsA("LinearVelocity")
+        or inst:IsA("AngularVelocity") then
+            inst:Destroy()
+        end
+    end
+end
+
+-- finds closest unoccupied car in workspace.CivCars
+local function findBestCar(targetHRP)
+    local civCars = workspace:FindFirstChild("CivCars")
+    if not civCars then return nil end
+    local best, bestDist = nil, math.huge
+    for _,car in ipairs(civCars:GetChildren()) do
+        local seat = car:FindFirstChild("DriveSeat")
+        if seat and not seat.Occupant then
+            local primary = car.PrimaryPart
+                or (car:FindFirstChild("Body") and car:FindFirstChild("Body"):FindFirstChild("#Weight"))
+                or car:FindFirstChildOfClass("BasePart")
+            if primary then
+                local dist = (primary.Position - targetHRP.Position).Magnitude
+                if dist < bestDist then best=car; bestDist=dist end
+            end
+        end
+    end
+    return best
+end
+
+local function launchFling(targetHRP)
+    cleanBodyForces(targetHRP)
+    local angle = math.random(0, 359)
+    local hx = math.cos(math.rad(angle)) * CAR_FLING_H_SPEED
+    local hz = math.sin(math.rad(angle)) * CAR_FLING_H_SPEED
+    local bv = Instance.new("BodyVelocity")
+    bv.MaxForce  = Vector3.new(1e9, 1e9, 1e9)
+    bv.Velocity  = Vector3.new(hx, CAR_FLING_V_SPEED, hz)
+    bv.Parent    = targetHRP
+    task.delay(CAR_BV_LIFETIME, function()
+        if bv and bv.Parent then bv:Destroy() end
+    end)
+end
+
+local function startCarFlingLoop(targetPlayer)
+    getgenv().carBugEnabled = true
+    task.spawn(function()
+        local myChar, myHRP, targetChar, targetHRP, car, driveSeat
+
+        while getgenv().carBugEnabled do
+            task.wait(CAR_FLING_INTERVAL)
+
+            -- refresh references each cycle — characters respawn
+            myChar = LocalPlayer.Character
+            myHRP  = myChar and myChar:FindFirstChild("HumanoidRootPart")
+            if not myChar or not myHRP then continue end
+
+            -- validate target still in server
+            local tp = Players:FindFirstChild(targetPlayer)
+            if not tp then
+                if AddLog then AddLog("warn","Car Fling: target left the server") end
+                getgenv().carBugEnabled = false
+                if actionRowRefs.carFlingToggleCb then actionRowRefs.carFlingToggleCb(false) end
+                break
+            end
+
+            targetChar = tp.Character
+            targetHRP  = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
+            if not targetChar or not targetHRP then continue end
+
+            -- find a car
+            car = findBestCar(targetHRP)
+            if not car then continue end
+
+            driveSeat = car:FindFirstChild("DriveSeat")
+            if not driveSeat or driveSeat.Occupant then continue end
+
+            -- ensure primary part set
+            if not car.PrimaryPart then
+                car.PrimaryPart =
+                    (car:FindFirstChild("Body") and car:FindFirstChild("Body"):FindFirstChild("#Weight"))
+                    or car:FindFirstChildOfClass("BasePart")
+            end
+            if not car.PrimaryPart then continue end
+
+            -- sit LocalPlayer if needed to unlock car, then bail immediately
+            local myHum = myChar:FindFirstChildOfClass("Humanoid")
+            if myHum and not driveSeat.Occupant then
+                local usable = car:GetAttribute("Usable")
+                if usable == false then
+                    pcall(function() driveSeat:Sit(myHum) end)
+                    car:SetAttribute("Usable", true)
+                    task.wait(0.12)
+                    pcall(function()
+                        myHum:ChangeState(Enum.HumanoidStateType.Jumping)
+                        myHum.Jump = true
+                        myHum.Sit  = false
+                    end)
+                    task.wait(0.08)
+                end
+            end
+
+            -- teleport car onto target then immediately launch
+            task.wait()  -- yield so physics settles one tick
+            local freshTarget = Players:FindFirstChild(targetPlayer)
+            if not freshTarget or not freshTarget.Character then continue end
+            local freshHRP = freshTarget.Character:FindFirstChild("HumanoidRootPart")
+            if not freshHRP then continue end
+
+            pcall(function()
+                car:SetPrimaryPartCFrame(freshHRP.CFrame + Vector3.new(0, 0.5, 0))
+            end)
+
+            -- double-tap: two velocity pulses in quick succession for reliability
+            pcall(function() launchFling(freshHRP) end)
+            task.wait(0.04)
+            local stillHRP = freshTarget.Character and freshTarget.Character:FindFirstChild("HumanoidRootPart")
+            if stillHRP then
+                pcall(function() launchFling(stillHRP) end)
+            end
+
+            carFlingHits += 1
+            if AddLog then AddLog("ok","Car fling hit #"..carFlingHits.." → "..targetPlayer) end
+            if actionRowRefs.carFlingHitLabel then
+                actionRowRefs.carFlingHitLabel.Text = "HITS: "..carFlingHits
+            end
+        end
+    end)
+end
+
+local function stopCarFling()
+    getgenv().carBugEnabled = false
+end
+
+-- ═══════════════════════════════════════════════════════════
+--  PLAYER ACTIONS
+-- ═══════════════════════════════════════════════════════════
+local function doSpectate(on)
+    spectateOn = on
+    if on then
+        if SelectedPlayer and SelectedPlayer.Character
+        and SelectedPlayer.Character:FindFirstChild("Humanoid") then
+            workspace.CurrentCamera.CameraSubject = SelectedPlayer.Character.Humanoid
+            if AddLog then AddLog("info","Spectating: "..SelectedPlayer.Name) end
+        else
+            spectateOn = false
+            if AddLog then AddLog("warn","Spectate: no valid target") end
+            return false
+        end
+    else
+        if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+            workspace.CurrentCamera.CameraSubject = LocalPlayer.Character.Humanoid
+        end
+        if AddLog then AddLog("info","Spectate off") end
+    end
+    return true
+end
+
+local function doBring(on)
+    bringOn = on
+    if on then
+        if not SelectedPlayer then
+            bringOn = false
+            if AddLog then AddLog("warn","Bring: no target selected") end
+            return false
+        end
+        local target = SelectedPlayer
+        bringActive = true
+        task.spawn(function()
+            while bringOn and bringActive do
+                local tChar  = target and target.Character
+                local tRoot  = tChar and tChar:FindFirstChild("HumanoidRootPart")
+                local myHRP  = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                if not tRoot or not myHRP then
+                    bringOn=false; bringActive=false
+                    if AddLog then AddLog("warn","Bring: target lost") end
+                    if actionRowRefs.bringToggleCb then actionRowRefs.bringToggleCb(false) end
+                    break
+                end
+                local tHum = tChar:FindFirstChildOfClass("Humanoid")
+                if tHum then tHum.Sit=false end
+                task.wait()
+                pcall(function() tRoot.CFrame=myHRP.CFrame+Vector3.new(3,1,0) end)
+                task.wait(0.1)
+            end
+            bringActive=false
+        end)
+        if AddLog then AddLog("info","Bringing: "..target.Name) end
+    else
+        bringActive=false
+        if AddLog then AddLog("info","Bring off") end
+    end
+    return true
+end
+
+local function doViewInventory()
+    if not SelectedPlayer then
+        if AddLog then AddLog("warn","Inventory: no target") end; return
+    end
+    local bp = SelectedPlayer:FindFirstChild("Backpack")
+    if not bp then
+        if AddLog then AddLog("warn","Inventory: backpack not visible") end; return
+    end
+    local items = {}
+    for _,i in ipairs(bp:GetChildren()) do
+        if i:IsA("Tool") then table.insert(items,i.Name) end
+    end
+    if SelectedPlayer.Character then
+        for _,i in ipairs(SelectedPlayer.Character:GetChildren()) do
+            if i:IsA("Tool") then table.insert(items,i.Name.." [EQ]") end
+        end
+    end
+    if AddLog then
+        if #items>0 then AddLog("ok",SelectedPlayer.Name..": "..table.concat(items,", "))
+        else AddLog("info",SelectedPlayer.Name.."'s backpack is empty") end
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════
+--  RAINBOW GUNS
+-- ═══════════════════════════════════════════════════════════
+local function storeOriginal(p)
+    if not getgenv().originalStates[p] then
+        getgenv().originalStates[p]={Color=p.Color,Material=p.Material,Transparency=p.Transparency}
+    end
+end
+local function startRainbow(tool)
+    if getgenv().activeRainbowThreads[tool] then return end
+    local parts={}
+    for _,p in ipairs(tool:GetDescendants()) do
+        if p:IsA("BasePart") then storeOriginal(p); table.insert(parts,p) end
+    end
+    if #parts==0 then return end
+    local stopped=false
+    getgenv().activeRainbowThreads[tool]=function() stopped=true end
+    task.spawn(function()
+        for _,p in ipairs(parts) do p.Material=Enum.Material.Neon; p.Transparency=0 end
+        local hue=0
+        while not stopped do
+            hue=(hue+0.04)%1
+            local color=Color3.fromHSV(hue,1,1)
+            for _,p in ipairs(parts) do if p and p.Parent then p.Color=color end end
+            task.wait(0.03)
+        end
+    end)
+end
+local function stopAllRainbows()
+    for _,stopper in pairs(getgenv().activeRainbowThreads) do stopper() end
+    for p,s in pairs(getgenv().originalStates) do
+        if p and p.Parent then p.Color=s.Color; p.Material=s.Material; p.Transparency=s.Transparency end
+    end
+    getgenv().originalStates={}; getgenv().activeRainbowThreads={}
+end
+local function setupAdminGuns(state)
+    local gunsFolder=workspace:FindFirstChild("GUNS")
+    if not gunsFolder then return end
+    local validGunNames={}
+    for _,gun in ipairs(gunsFolder:GetChildren()) do validGunNames[gun.Name]=true end
+    if state then
+        local bp,char=LocalPlayer.Backpack,LocalPlayer.Character
+        if bp   then for _,t in ipairs(bp:GetChildren())   do if t:IsA("Tool") and validGunNames[t.Name] then startRainbow(t) end end end
+        if char then for _,t in ipairs(char:GetChildren()) do if t:IsA("Tool") and validGunNames[t.Name] then startRainbow(t) end end end
+        table.insert(getgenv().rainbowConnections,
+            LocalPlayer.Backpack.ChildAdded:Connect(function(t)
+                if t:IsA("Tool") and validGunNames[t.Name] then startRainbow(t) end
+            end))
+        table.insert(getgenv().rainbowConnections,
+            LocalPlayer.CharacterAdded:Connect(function(c)
+                c.ChildAdded:Connect(function(t)
+                    if t:IsA("Tool") and validGunNames[t.Name] then startRainbow(t) end
+                end)
+            end))
+    else
+        stopAllRainbows()
+        for _,c in ipairs(getgenv().rainbowConnections) do c:Disconnect() end
+        getgenv().rainbowConnections={}
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════
+--  GUI
+-- ═══════════════════════════════════════════════════════════
+local ScreenGui=Instance.new("ScreenGui")
+ScreenGui.Name="BuyKidsDupe"; ScreenGui.ResetOnSpawn=false
+ScreenGui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling; ScreenGui.IgnoreGuiInset=true
+if gethui then ScreenGui.Parent=gethui()
+elseif syn and syn.protect_gui then syn.protect_gui(ScreenGui); ScreenGui.Parent=game.CoreGui
+else pcall(function() ScreenGui.Parent=game.CoreGui end)
+    if not ScreenGui.Parent then ScreenGui.Parent=LocalPlayer.PlayerGui end
+end
+
+local C = {
+    BG        = Color3.fromRGB(10,  10,  12),
+    Card      = Color3.fromRGB(18,  18,  24),
+    Input     = Color3.fromRGB(8,   8,   12),
+    Accent    = Color3.fromRGB(232, 54,  42),
+    AccentDim = Color3.fromRGB(40,  12,  10),
+    Green     = Color3.fromRGB(34,  197, 94),
+    Yellow    = Color3.fromRGB(245, 158, 11),
+    Blue      = Color3.fromRGB(96,  165, 250),
+    Orange    = Color3.fromRGB(251, 146, 60),
+    TextPri   = Color3.fromRGB(240, 240, 240),
+    TextSec   = Color3.fromRGB(138, 138, 154),
+    TextDim   = Color3.fromRGB(74,  74,  90),
+    Border    = Color3.fromRGB(30,  30,  40),
+    BorderAcc = Color3.fromRGB(80,  20,  18),
+    White     = Color3.fromRGB(255, 255, 255),
+    DropBG    = Color3.fromRGB(14,  14,  20),
+    DropHover = Color3.fromRGB(28,  18,  32),
+}
+
+local WIN_W, WIN_H = 460, 560
+
+local function Make(cls,props,parent)
+    local o=Instance.new(cls)
+    for k,v in pairs(props) do o[k]=v end
+    if parent then o.Parent=parent end
+    return o
+end
+local function MakeFrame(p,par)
+    p.BackgroundColor3=p.BackgroundColor3 or C.Card
+    p.BorderSizePixel=p.BorderSizePixel or 0
+    return Make("Frame",p,par)
+end
+local function MakeLabel(p,par)
+    p.BackgroundTransparency=p.BackgroundTransparency or 1
+    p.BorderSizePixel=p.BorderSizePixel or 0
+    p.Font=p.Font or Enum.Font.GothamBold
+    p.TextColor3=p.TextColor3 or C.TextPri
+    p.TextSize=p.TextSize or 12
+    p.TextXAlignment=p.TextXAlignment or Enum.TextXAlignment.Left
+    return Make("TextLabel",p,par)
+end
+local function MakeButton(p,par)
+    p.BackgroundColor3=p.BackgroundColor3 or C.AccentDim
+    p.BorderSizePixel=p.BorderSizePixel or 0
+    p.Font=p.Font or Enum.Font.GothamBold
+    p.TextColor3=p.TextColor3 or C.Accent
+    p.TextSize=p.TextSize or 11
+    p.AutoButtonColor=false
+    return Make("TextButton",p,par)
+end
+local function MakeInput(p,par)
+    p.BackgroundColor3=p.BackgroundColor3 or C.Input
+    p.BorderSizePixel=p.BorderSizePixel or 0
+    p.Font=p.Font or Enum.Font.Code
+    p.TextColor3=p.TextColor3 or C.TextPri
+    p.TextSize=p.TextSize or 11
+    return Make("TextBox",p,par)
+end
+local function Stroke(par,col,th)
+    local s=Instance.new("UIStroke")
+    s.Color=col or C.Border; s.Thickness=th or 1; s.Parent=par; return s
+end
+local function Corner(par,r)
+    local c=Instance.new("UICorner")
+    c.CornerRadius=UDim.new(0,r or 4); c.Parent=par; return c
+end
+local function Pad(par,t,b,l,r)
+    local p=Instance.new("UIPadding")
+    p.PaddingTop=UDim.new(0,t or 6); p.PaddingBottom=UDim.new(0,b or 6)
+    p.PaddingLeft=UDim.new(0,l or 10); p.PaddingRight=UDim.new(0,r or 10)
+    p.Parent=par; return p
+end
+
+-- ── WINDOW ──────────────────────────────────────────────────
+local Win=MakeFrame({
+    Size=UDim2.new(0,WIN_W,0,WIN_H),
+    Position=UDim2.new(0.5,-WIN_W/2,0.5,-WIN_H/2),
+    BackgroundColor3=C.BG,ClipsDescendants=true,
+},ScreenGui)
+Corner(Win,6); Stroke(Win,C.Accent,1.5)
+MakeFrame({Size=UDim2.new(1,0,0,2),BackgroundColor3=C.Accent,ZIndex=10},Win)
+
+local TitleBar=MakeFrame({
+    Size=UDim2.new(1,0,0,32),Position=UDim2.new(0,0,0,2),
+    BackgroundColor3=Color3.fromRGB(14,6,5),
+},Win)
+MakeLabel({Size=UDim2.new(1,-90,1,0),Position=UDim2.new(0,12,0,0),Text="⬡  BUYKIDS DUPE  v2.8",TextSize=12,ZIndex=5},TitleBar)
+local CloseBtn=MakeButton({Size=UDim2.new(0,24,0,20),Position=UDim2.new(1,-28,0.5,-10),Text="✕",TextSize=12,BackgroundColor3=Color3.fromRGB(60,10,8),TextColor3=C.Accent,ZIndex=10},TitleBar)
+Corner(CloseBtn,3)
+local MinBtn=MakeButton({Size=UDim2.new(0,24,0,20),Position=UDim2.new(1,-56,0.5,-10),Text="−",TextSize=14,BackgroundColor3=C.Card,TextColor3=C.TextSec,ZIndex=10},TitleBar)
+Corner(MinBtn,3)
+
+local StatusBar=MakeFrame({Size=UDim2.new(1,0,0,24),Position=UDim2.new(0,0,0,34),BackgroundColor3=Color3.fromRGB(8,8,10)},Win)
+local StatusDot=MakeFrame({Size=UDim2.new(0,7,0,7),Position=UDim2.new(0,10,0.5,-3.5),BackgroundColor3=C.Yellow},StatusBar)
+Corner(StatusDot,4)
+local StatusLabel=MakeLabel({Size=UDim2.new(0,70,1,0),Position=UDim2.new(0,23,0,0),Text="IDLE",TextSize=10,TextColor3=C.Yellow},StatusBar)
+local ItemPill=MakeLabel({Size=UDim2.new(0,150,1,0),Position=UDim2.new(0,96,0,0),Text="NO ITEM",TextSize=10,TextColor3=C.TextDim},StatusBar)
+local CountLabel=MakeLabel({Size=UDim2.new(0,100,1,0),Position=UDim2.new(1,-106,0,0),Text="STORED: 0",TextSize=10,TextColor3=C.Accent,Font=Enum.Font.Code,TextXAlignment=Enum.TextXAlignment.Right},StatusBar)
+
+local TabBar=MakeFrame({Size=UDim2.new(1,0,0,26),Position=UDim2.new(0,0,0,58),BackgroundColor3=Color3.fromRGB(12,12,16)},Win)
+Stroke(TabBar,C.Border,1)
+local TABS={"DUPE","RAINBOW","MARKET","SETTINGS","BLACKLIST"}
+local TabBtns={}
+for i,name in ipairs(TABS) do
+    local w=1/#TABS
+    TabBtns[name]=MakeButton({Size=UDim2.new(w,-1,1,0),Position=UDim2.new(w*(i-1),0,0,0),Text=name,TextSize=9,BackgroundColor3=Color3.fromRGB(12,12,16),TextColor3=C.TextDim},TabBar)
+end
+
+local ContentArea=MakeFrame({Size=UDim2.new(1,0,1,-88),Position=UDim2.new(0,0,0,84),BackgroundColor3=C.BG,ClipsDescendants=true},Win)
+local Panels={}
+local function NewPanel(name)
+    local p=MakeFrame({Size=UDim2.new(1,0,1,0),BackgroundColor3=C.BG,Visible=false},ContentArea)
+    Panels[name]=p; return p
+end
+local function SecLabel(text,parent,yPos)
+    local row=MakeFrame({Size=UDim2.new(1,-24,0,16),Position=UDim2.new(0,12,0,yPos),BackgroundColor3=C.BG},parent)
+    MakeFrame({Size=UDim2.new(0,3,0,9),Position=UDim2.new(0,0,0.5,-4.5),BackgroundColor3=C.Accent},row)
+    MakeLabel({Size=UDim2.new(1,-12,1,0),Position=UDim2.new(0,10,0,0),Text=text:upper(),TextSize=8,TextColor3=C.TextDim},row)
+    MakeFrame({Size=UDim2.new(1,-10,0,1),Position=UDim2.new(0,10,1,0),BackgroundColor3=C.Border},row)
+    return row
+end
+
+-- ═══════════════════════════════════════════════════════════
+--  PLAYER DROPDOWN
+-- ═══════════════════════════════════════════════════════════
+local function MakePlayerDropdown(parent,yPos,onSelect)
+    local DROPDOWN_H=32; local LIST_ITEM_H=28; local MAX_VISIBLE=6
+    local header=MakeButton({Size=UDim2.new(1,-24,0,DROPDOWN_H),Position=UDim2.new(0,12,0,yPos),Text="",TextSize=11,BackgroundColor3=C.Card,TextColor3=C.TextPri,ZIndex=5},parent)
+    Corner(header,4); Stroke(header,C.Border,1)
+    MakeLabel({Size=UDim2.new(0,20,1,0),Position=UDim2.new(0,10,0,0),Text="👤",TextSize=13,TextXAlignment=Enum.TextXAlignment.Center,ZIndex=6},header)
+    local headerText=MakeLabel({Size=UDim2.new(1,-56,1,0),Position=UDim2.new(0,34,0,0),Text="None",TextSize=11,TextColor3=C.TextSec,Font=Enum.Font.GothamBold,ZIndex=6},header)
+    local chevron=MakeLabel({Size=UDim2.new(0,18,1,0),Position=UDim2.new(1,-22,0,0),Text="▾",TextSize=12,TextColor3=C.TextDim,TextXAlignment=Enum.TextXAlignment.Center,ZIndex=6},header)
+    MakeLabel({Size=UDim2.new(0,90,0,14),Position=UDim2.new(1,-102,0.5,-7),Text="[RSHIFT] REFRESH",TextSize=7,Font=Enum.Font.Code,TextColor3=C.TextDim,TextXAlignment=Enum.TextXAlignment.Right,ZIndex=6},header)
+    local listFrame=Make("Frame",{Size=UDim2.new(1,-24,0,0),Position=UDim2.new(0,12,0,yPos+DROPDOWN_H+2),BackgroundColor3=C.DropBG,BorderSizePixel=0,ClipsDescendants=true,Visible=false,ZIndex=20},parent)
+    Corner(listFrame,4); Stroke(listFrame,C.BorderAcc,1)
+    local listScroll=Make("ScrollingFrame",{Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=3,ScrollBarImageColor3=C.Border,CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollingDirection=Enum.ScrollingDirection.Y,ZIndex=21},listFrame)
+    Make("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,1),Parent=listScroll})
+    local isOpen=false; local selected="None"
+    local function closeList()
+        isOpen=false; chevron.Text="▾"
+        TweenService:Create(listFrame,TweenInfo.new(0.12),{Size=UDim2.new(1,-24,0,0)}):Play()
+        task.delay(0.13,function() listFrame.Visible=false end)
+        Stroke(header,C.Border,1)
+    end
+    local function buildItems(list)
+        for _,v in pairs(listScroll:GetChildren()) do if v:IsA("TextButton") or v:IsA("Frame") then v:Destroy() end end
+        for idx,name in ipairs(list) do
+            local isNone=name=="None"
+            local btn=MakeButton({Size=UDim2.new(1,0,0,LIST_ITEM_H),Text="",BackgroundColor3=name==selected and Color3.fromRGB(40,14,12) or C.DropBG,ZIndex=22,LayoutOrder=idx},listScroll)
+            local dot=MakeFrame({Size=UDim2.new(0,4,0,4),Position=UDim2.new(0,8,0.5,-2),BackgroundColor3=name==selected and C.Accent or C.DropBG,ZIndex=23},btn)
+            Corner(dot,2)
+            MakeLabel({Size=UDim2.new(1,-26,1,0),Position=UDim2.new(0,18,0,0),Text=isNone and "— None —" or name,TextSize=11,Font=Enum.Font.GothamBold,TextColor3=isNone and C.TextDim or (name==selected and C.Accent or C.TextSec),ZIndex=23},btn)
+            btn.MouseEnter:Connect(function() if name~=selected then TweenService:Create(btn,TweenInfo.new(0.08),{BackgroundColor3=C.DropHover}):Play() end end)
+            btn.MouseLeave:Connect(function() if name~=selected then TweenService:Create(btn,TweenInfo.new(0.08),{BackgroundColor3=C.DropBG}):Play() end end)
+            btn.MouseButton1Click:Connect(function()
+                selected=name
+                headerText.Text=name=="None" and "None" or name
+                headerText.TextColor3=name=="None" and C.TextDim or C.TextPri
+                closeList(); if onSelect then onSelect(name) end; buildItems(list)
+            end)
+        end
+    end
+    local lastList=buildPlayerList()
+    local function refresh()
+        lastList=buildPlayerList()
+        local s=Instance.new("UIStroke"); s.Color=C.Green; s.Thickness=1; s.Parent=header
+        task.delay(0.5,function() s:Destroy(); Stroke(header,isOpen and C.BorderAcc or C.Border,1) end)
+        if isOpen then buildItems(lastList); listFrame.Size=UDim2.new(1,-24,0,math.min(#lastList,MAX_VISIBLE)*LIST_ITEM_H+2) end
+    end
+    local function openList(list)
+        isOpen=true; chevron.Text="▴"
+        buildItems(list)
+        listFrame.Size=UDim2.new(1,-24,0,0); listFrame.Visible=true; Stroke(header,C.BorderAcc,1)
+        TweenService:Create(listFrame,TweenInfo.new(0.15),{Size=UDim2.new(1,-24,0,math.min(#list,MAX_VISIBLE)*LIST_ITEM_H+2)}):Play()
+    end
+    header.MouseButton1Click:Connect(function()
+        lastList=buildPlayerList()
+        if isOpen then closeList() else openList(lastList) end
+    end)
+    return {frame=header,list=listFrame,refresh=refresh,getSelected=function() return selected end}
+end
+
+-- ═══════════════════════════════════════════════════════════
+--  PANEL: DUPE
+-- ═══════════════════════════════════════════════════════════
+local DupePanel=NewPanel("DUPE")
+local DupeScroll=Make("ScrollingFrame",{
+    Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,BorderSizePixel=0,
+    ScrollBarThickness=3,ScrollBarImageColor3=C.Border,
+    CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,
+    ScrollingDirection=Enum.ScrollingDirection.Y,
+},DupePanel)
+Make("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,0),Parent=DupeScroll})
+
+local DupeContainer=MakeFrame({Size=UDim2.new(1,0,0,600),BackgroundColor3=C.BG,LayoutOrder=1},DupeScroll)
+
+-- item card
+SecLabel("Current Target",DupeContainer,8)
+local ItemCard=MakeFrame({Size=UDim2.new(1,-24,0,46),Position=UDim2.new(0,12,0,30),BackgroundColor3=C.Card},DupeContainer)
+Corner(ItemCard,4); Stroke(ItemCard,C.BorderAcc,1)
+local ItemIcon=MakeLabel({Size=UDim2.new(0,32,0,32),Position=UDim2.new(0,8,0.5,-16),Text="⚔",TextSize=18,TextXAlignment=Enum.TextXAlignment.Center,BackgroundColor3=C.AccentDim,BackgroundTransparency=0},ItemCard)
+Corner(ItemIcon,4); Stroke(ItemIcon,C.BorderAcc,1)
+local ItemNameLabel=MakeLabel({Size=UDim2.new(1,-110,0,18),Position=UDim2.new(0,48,0,6),Text="No Item Equipped",TextSize=13,Font=Enum.Font.GothamBold},ItemCard)
+local ItemMetaLabel=MakeLabel({Size=UDim2.new(1,-110,0,14),Position=UDim2.new(0,48,0,26),Text="Equip an item to begin",TextSize=9,Font=Enum.Font.Gotham,TextColor3=C.TextSec},ItemCard)
+local ItemBadge=MakeLabel({Size=UDim2.new(0,60,0,18),Position=UDim2.new(1,-68,0.5,-9),Text="READY",TextSize=8,Font=Enum.Font.GothamBold,TextColor3=C.Green,TextXAlignment=Enum.TextXAlignment.Center,BackgroundColor3=Color3.fromRGB(10,40,22),BackgroundTransparency=0},ItemCard)
+Corner(ItemBadge,3); Stroke(ItemBadge,Color3.fromRGB(20,80,44),1)
+
+-- dropdown
+SecLabel("Target Player",DupeContainer,84)
+local playerDropdown=MakePlayerDropdown(DupeContainer,106,function(name)
+    if name=="None" then
+        SelectedPlayer=nil
+        if bringOn then bringOn=false; bringActive=false end
+        if spectateOn then doSpectate(false) end
+        if carFlingOn then
+            carFlingOn=false; stopCarFling()
+            if actionRowRefs.carFlingToggleCb then actionRowRefs.carFlingToggleCb(false) end
+        end
+    else
+        local rawName=name:match("^(.-)%s+%(") or name
+        SelectedPlayer=getPlayerByName(rawName)
+        getgenv().carBugTarget=rawName
+    end
+end)
+
+-- ── ACTION HELPERS ───────────────────────────────────────────
+local function ActionToggle(label,icon,yPos,colorOn,onToggle)
+    local row=MakeFrame({Size=UDim2.new(1,-24,0,34),Position=UDim2.new(0,12,0,yPos),BackgroundColor3=C.Card},DupeContainer)
+    Corner(row,4); Stroke(row,C.Border,1)
+    MakeLabel({Size=UDim2.new(0,22,1,0),Position=UDim2.new(0,8,0,0),Text=icon,TextSize=14,TextXAlignment=Enum.TextXAlignment.Center},row)
+    MakeLabel({Size=UDim2.new(1,-100,1,0),Position=UDim2.new(0,34,0,0),Text=label,TextSize=11,Font=Enum.Font.GothamBold,TextColor3=C.TextSec},row)
+    local pillBg=MakeFrame({Size=UDim2.new(0,44,0,22),Position=UDim2.new(1,-54,0.5,-11),BackgroundColor3=C.Input},row)
+    Corner(pillBg,11); Stroke(pillBg,C.Border,1)
+    local pillNub=MakeFrame({Size=UDim2.new(0,16,0,16),Position=UDim2.new(0,3,0.5,-8),BackgroundColor3=C.White},pillBg)
+    Corner(pillNub,8)
+    local pillLabel=MakeLabel({Size=UDim2.new(1,0,1,0),Text="OFF",TextSize=8,Font=Enum.Font.GothamBold,TextColor3=C.TextDim,TextXAlignment=Enum.TextXAlignment.Center},pillBg)
+    local state=false
+    local function setState(v,silent)
+        state=v
+        if v then
+            TweenService:Create(pillBg,TweenInfo.new(0.15),{BackgroundColor3=colorOn}):Play()
+            TweenService:Create(pillNub,TweenInfo.new(0.15),{Position=UDim2.new(1,-19,0.5,-8)}):Play()
+            pillLabel.Text="ON"; pillLabel.TextColor3=C.White; Stroke(pillBg,colorOn,1)
+        else
+            TweenService:Create(pillBg,TweenInfo.new(0.15),{BackgroundColor3=C.Input}):Play()
+            TweenService:Create(pillNub,TweenInfo.new(0.15),{Position=UDim2.new(0,3,0.5,-8)}):Play()
+            pillLabel.Text="OFF"; pillLabel.TextColor3=C.TextDim; Stroke(pillBg,C.Border,1)
+        end
+        if not silent and onToggle then onToggle(v) end
+    end
+    pillBg.InputBegan:Connect(function(i)
+        if i.UserInputType==Enum.UserInputType.MouseButton1 then setState(not state) end
+    end)
+    return setState
+end
+
+local function ActionButton(label,icon,btnText,btnColor,yPos,extraLabel,onClick)
+    local row=MakeFrame({Size=UDim2.new(1,-24,0,34),Position=UDim2.new(0,12,0,yPos),BackgroundColor3=C.Card},DupeContainer)
+    Corner(row,4); Stroke(row,C.Border,1)
+    MakeLabel({Size=UDim2.new(0,22,1,0),Position=UDim2.new(0,8,0,0),Text=icon,TextSize=14,TextXAlignment=Enum.TextXAlignment.Center},row)
+    MakeLabel({Size=UDim2.new(1,-150,1,0),Position=UDim2.new(0,34,0,0),Text=label,TextSize=11,Font=Enum.Font.GothamBold,TextColor3=C.TextSec},row)
+    local extraLbl=nil
+    if extraLabel then
+        extraLbl=MakeLabel({Size=UDim2.new(0,60,1,0),Position=UDim2.new(1,-132,0,0),Text=extraLabel,TextSize=8,Font=Enum.Font.Code,TextColor3=C.TextDim,TextXAlignment=Enum.TextXAlignment.Right},row)
+    end
+    local btn=MakeButton({
+        Size=UDim2.new(0,60,0,24),Position=UDim2.new(1,-70,0.5,-12),
+        Text=btnText,TextSize=10,Font=Enum.Font.GothamBold,
+        BackgroundColor3=Color3.new(btnColor.R*0.16,btnColor.G*0.16,btnColor.B*0.16),
+        TextColor3=btnColor,
+    },row)
+    Corner(btn,3); Stroke(btn,Color3.new(btnColor.R*0.35,btnColor.G*0.35,btnColor.B*0.35),1)
+    btn.MouseEnter:Connect(function() TweenService:Create(btn,TweenInfo.new(0.1),{BackgroundColor3=btnColor,TextColor3=C.White}):Play() end)
+    btn.MouseLeave:Connect(function() TweenService:Create(btn,TweenInfo.new(0.1),{BackgroundColor3=Color3.new(btnColor.R*0.16,btnColor.G*0.16,btnColor.B*0.16),TextColor3=btnColor}):Play() end)
+    btn.MouseButton1Click:Connect(function() if onClick then onClick() end end)
+    return extraLbl
+end
+
+SecLabel("Player Actions",DupeContainer,146)
+
+-- spectate
+local setSpectate=ActionToggle("Spectate Player","👁",168,C.Blue,function(v)
+    local ok=doSpectate(v)
+    if not ok then task.defer(function() setSpectate(false,true) end) end
+end)
+actionRowRefs.spectateToggleCb=function(v) setSpectate(v,true) end
+
+-- bring
+local setBring=ActionToggle("Bring Player","🧲",210,C.Green,function(v)
+    local ok=doBring(v)
+    if not ok then task.defer(function() setBring(false,true) end) end
+end)
+actionRowRefs.bringToggleCb=function(v) setBring(v,true) end
+
+-- view inventory
+ActionButton("View Inventory","🎒","VIEW",C.Blue,252,nil,function() doViewInventory() end)
+
+-- ── CAR BODY FLING ROW ──────────────────────────────────────
+-- custom wider row: toggle + hit counter
+local carRow=MakeFrame({Size=UDim2.new(1,-24,0,46),Position=UDim2.new(0,12,0,294),BackgroundColor3=C.Card},DupeContainer)
+Corner(carRow,4); Stroke(carRow,C.Border,1)
+
+-- icon + label
+MakeLabel({Size=UDim2.new(0,22,0,22),Position=UDim2.new(0,8,0.5,-11),Text="🚗",TextSize=15,TextXAlignment=Enum.TextXAlignment.Center},carRow)
+MakeLabel({Size=UDim2.new(1,-160,0,18),Position=UDim2.new(0,34,0,5),Text="Car Body Fling",TextSize=11,Font=Enum.Font.GothamBold,TextColor3=C.TextSec},carRow)
+
+-- hit counter label (updated by loop)
+local carHitLbl=MakeLabel({
+    Size=UDim2.new(0,70,0,12),Position=UDim2.new(0,34,0,27),
+    Text="HITS: 0",TextSize=8,Font=Enum.Font.Code,TextColor3=C.TextDim,
+},carRow)
+actionRowRefs.carFlingHitLabel=carHitLbl
+
+-- speed sub-label
+MakeLabel({Size=UDim2.new(1,-160,0,12),Position=UDim2.new(0,108,0,27),Text="18k H · 42k V · 0.18s cycle",TextSize=7,Font=Enum.Font.Gotham,TextColor3=C.TextDim},carRow)
+
+-- pill toggle
+local carPillBg=MakeFrame({Size=UDim2.new(0,44,0,22),Position=UDim2.new(1,-54,0.5,-11),BackgroundColor3=C.Input},carRow)
+Corner(carPillBg,11); Stroke(carPillBg,C.Border,1)
+local carPillNub=MakeFrame({Size=UDim2.new(0,16,0,16),Position=UDim2.new(0,3,0.5,-8),BackgroundColor3=C.White},carPillBg)
+Corner(carPillNub,8)
+local carPillLbl=MakeLabel({Size=UDim2.new(1,0,1,0),Text="OFF",TextSize=8,Font=Enum.Font.GothamBold,TextColor3=C.TextDim,TextXAlignment=Enum.TextXAlignment.Center},carPillBg)
+
+local function setCarFlingUI(v,silent)
+    carFlingOn=v
+    if v then
+        TweenService:Create(carPillBg,TweenInfo.new(0.15),{BackgroundColor3=C.Orange}):Play()
+        TweenService:Create(carPillNub,TweenInfo.new(0.15),{Position=UDim2.new(1,-19,0.5,-8)}):Play()
+        carPillLbl.Text="ON"; carPillLbl.TextColor3=C.White; Stroke(carPillBg,C.Orange,1)
+        Stroke(carRow,C.Orange,1)
+    else
+        TweenService:Create(carPillBg,TweenInfo.new(0.15),{BackgroundColor3=C.Input}):Play()
+        TweenService:Create(carPillNub,TweenInfo.new(0.15),{Position=UDim2.new(0,3,0.5,-8)}):Play()
+        carPillLbl.Text="OFF"; carPillLbl.TextColor3=C.TextDim; Stroke(carPillBg,C.Border,1)
+        Stroke(carRow,C.Border,1)
+    end
+    if not silent then
+        if v then
+            if not getgenv().carBugTarget or getgenv().carBugTarget=="" then
+                if AddLog then AddLog("warn","Car Fling: select a target first") end
+                task.defer(function() setCarFlingUI(false,true) end)
+                return
+            end
+            carFlingHits=0; carHitLbl.Text="HITS: 0"
+            startCarFlingLoop(getgenv().carBugTarget)
+            if AddLog then AddLog("info","Car fling started → "..tostring(getgenv().carBugTarget)) end
+        else
+            stopCarFling()
+            if AddLog then AddLog("info","Car fling stopped — "..carFlingHits.." total hits") end
+        end
+    end
+end
+actionRowRefs.carFlingToggleCb=function(v) setCarFlingUI(v,true) end
+
+carPillBg.InputBegan:Connect(function(i)
+    if i.UserInputType==Enum.UserInputType.MouseButton1 then setCarFlingUI(not carFlingOn) end
+end)
+
+-- ── DUPE CONTROLS ───────────────────────────────────────────
+SecLabel("Dupe Controls",DupeContainer,350)
+local MainBtn=MakeButton({
+    Size=UDim2.new(1,-24,0,36),Position=UDim2.new(0,12,0,372),
+    Text="▶   START DUPE",TextSize=13,Font=Enum.Font.GothamBold,
+    BackgroundColor3=C.Accent,TextColor3=C.White,
+},DupeContainer)
+Corner(MainBtn,4)
+
+SecLabel("Session Stats",DupeContainer,416)
+local StatValues={}
+local statDefs={{l="STORED",k="stored",v="0",c=C.Green},{l="CYCLES",k="cycles",v="0",c=C.TextPri},{l="RUNTIME",k="runtime",v="0:00",c=C.Yellow}}
+local boxW=math.floor((WIN_W-24-16)/3)
+for i,d in ipairs(statDefs) do
+    local box=MakeFrame({Size=UDim2.new(0,boxW,0,44),Position=UDim2.new(0,12+(i-1)*(boxW+8),0,438),BackgroundColor3=C.Card},DupeContainer)
+    Corner(box,3); Stroke(box,C.Border,1)
+    local vl=MakeLabel({Size=UDim2.new(1,0,0,24),Position=UDim2.new(0,0,0,6),Text=d.v,TextSize=18,Font=Enum.Font.Code,TextColor3=d.c,TextXAlignment=Enum.TextXAlignment.Center},box)
+    MakeLabel({Size=UDim2.new(1,0,0,12),Position=UDim2.new(0,0,1,-14),Text=d.l,TextSize=7,Font=Enum.Font.GothamBold,TextColor3=C.TextDim,TextXAlignment=Enum.TextXAlignment.Center},box)
+    StatValues[d.k]=vl
+end
+
+SecLabel("Activity Log",DupeContainer,490)
+local LogFrame=MakeFrame({Size=UDim2.new(1,-24,0,90),Position=UDim2.new(0,12,0,512),BackgroundColor3=C.Input,ClipsDescendants=true},DupeContainer)
+Corner(LogFrame,3); Stroke(LogFrame,C.Border,1)
+local LogScroll=Make("ScrollingFrame",{Size=UDim2.new(1,-4,1,-4),Position=UDim2.new(0,2,0,2),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=3,ScrollBarImageColor3=C.Border,CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollingDirection=Enum.ScrollingDirection.Y},LogFrame)
+Make("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,1),Parent=LogScroll})
+
+-- ═══════════════════════════════════════════════════════════
+--  LOG
+-- ═══════════════════════════════════════════════════════════
+local logColors={ok=C.Green,warn=C.Yellow,err=C.Accent,info=C.Blue}
+AddLog=function(t,msg)
+    local ts=os.date("%H:%M")
+    local col=logColors[t] or C.TextSec
+    local line=MakeFrame({Size=UDim2.new(1,-6,0,15),BackgroundTransparency=1,LayoutOrder=#LogScroll:GetChildren()},LogScroll)
+    MakeLabel({Size=UDim2.new(0,38,1,0),Text="["..ts.."]",TextSize=9,Font=Enum.Font.Code,TextColor3=C.TextDim},line)
+    MakeLabel({Size=UDim2.new(1,-42,1,0),Position=UDim2.new(0,42,0,0),Text=msg,TextSize=9,Font=Enum.Font.Code,TextColor3=col,TextTruncate=Enum.TextTruncate.AtEnd},line)
+    table.insert(logLines,line)
+    if #logLines>MAX_LOG then logLines[1]:Destroy(); table.remove(logLines,1) end
+    task.defer(function()
+        LogScroll.CanvasPosition=Vector2.new(0,math.max(0,LogScroll.AbsoluteCanvasSize.Y-LogScroll.AbsoluteSize.Y))
+    end)
+end
+AddLog("info","BuyKids Dupe v2.8 ready.")
+
+-- ═══════════════════════════════════════════════════════════
+--  PANEL: RAINBOW
+-- ═══════════════════════════════════════════════════════════
+local RainbowPanel=NewPanel("RAINBOW")
+SecLabel("Rainbow Guns",RainbowPanel,10)
+local RbCard=MakeFrame({Size=UDim2.new(1,-24,0,70),Position=UDim2.new(0,12,0,32),BackgroundColor3=C.Card},RainbowPanel)
+Corner(RbCard,4); Stroke(RbCard,C.Border,1)
+local RbIcon=MakeLabel({Size=UDim2.new(0,42,0,42),Position=UDim2.new(0,10,0.5,-21),Text="🌈",TextSize=24,TextXAlignment=Enum.TextXAlignment.Center,BackgroundColor3=Color3.fromRGB(20,10,35),BackgroundTransparency=0},RbCard)
+Corner(RbIcon,4)
+MakeLabel({Size=UDim2.new(1,-120,0,18),Position=UDim2.new(0,62,0,12),Text="Rainbow Guns",TextSize=13,Font=Enum.Font.GothamBold},RbCard)
+MakeLabel({Size=UDim2.new(1,-120,0,14),Position=UDim2.new(0,62,0,30),Text="Neon material · fast HSV cycle · auto-reapply",TextSize=9,Font=Enum.Font.Gotham,TextColor3=C.TextSec},RbCard)
+MakeLabel({Size=UDim2.new(1,-120,0,12),Position=UDim2.new(0,62,0,48),Text="Requires workspace.GUNS folder",TextSize=8,Font=Enum.Font.Gotham,TextColor3=C.TextDim},RbCard)
+local RbToggle=MakeButton({Size=UDim2.new(0,64,0,26),Position=UDim2.new(1,-74,0.5,-13),Text="OFF",TextSize=11,Font=Enum.Font.GothamBold,BackgroundColor3=C.Card,TextColor3=C.TextDim},RbCard)
+Corner(RbToggle,4); Stroke(RbToggle,C.Border,1)
+local RbPreview=MakeFrame({Size=UDim2.new(1,-24,0,28),Position=UDim2.new(0,12,0,112),BackgroundColor3=C.Card},RainbowPanel)
+Corner(RbPreview,4)
+local RbPreviewLabel=MakeLabel({Size=UDim2.new(1,0,1,0),Text="● INACTIVE",TextSize=10,Font=Enum.Font.GothamBold,TextColor3=C.TextDim,TextXAlignment=Enum.TextXAlignment.Center},RbPreview)
+SecLabel("Effect Details",RainbowPanel,148)
+local rbInfoData={{"Material","Neon (full brightness, no shadows)"},{"Cycle Speed","~33 fps — 0.04 hue shift per frame"},{"Scope","All BaseParts in valid GUNS folder tools"},{"On Pickup","Auto-applies to any gun grabbed mid-session"}}
+for i,row in ipairs(rbInfoData) do
+    local y=170+(i-1)*32
+    local f=MakeFrame({Size=UDim2.new(1,-24,0,28),Position=UDim2.new(0,12,0,y),BackgroundColor3=C.Card},RainbowPanel)
+    Corner(f,3); Stroke(f,C.Border,1)
+    MakeLabel({Size=UDim2.new(0,100,1,0),Position=UDim2.new(0,10,0,0),Text=row[1],TextSize=10,Font=Enum.Font.GothamBold,TextColor3=C.TextSec},f)
+    MakeLabel({Size=UDim2.new(1,-114,1,0),Position=UDim2.new(0,110,0,0),Text=row[2],TextSize=9,Font=Enum.Font.Gotham,TextColor3=C.TextDim},f)
+end
+local rbHue=0
+task.spawn(function()
+    while ScreenGui.Parent do
+        task.wait(0.04)
+        if rainbowOn then
+            rbHue=(rbHue+0.04)%1
+            local col=Color3.fromHSV(rbHue,1,1)
+            RbPreview.BackgroundColor3=col; RbPreviewLabel.TextColor3=Color3.fromRGB(0,0,0)
+            RbPreviewLabel.Text="● ACTIVE — CYCLING"; RbIcon.BackgroundColor3=Color3.fromHSV(rbHue,0.8,0.4)
+        else
+            RbPreview.BackgroundColor3=C.Card; RbPreviewLabel.TextColor3=C.TextDim
+            RbPreviewLabel.Text="● INACTIVE"; RbIcon.BackgroundColor3=Color3.fromRGB(20,10,35)
+        end
+    end
+end)
+RbToggle.MouseButton1Click:Connect(function()
+    rainbowOn=not rainbowOn; setupAdminGuns(rainbowOn)
+    if rainbowOn then RbToggle.Text="ON"; RbToggle.TextColor3=C.Green; RbToggle.BackgroundColor3=Color3.fromRGB(10,40,20); Stroke(RbToggle,Color3.fromRGB(20,80,40),1)
+    else RbToggle.Text="OFF"; RbToggle.TextColor3=C.TextDim; RbToggle.BackgroundColor3=C.Card; Stroke(RbToggle,C.Border,1) end
+end)
+
+-- ═══════════════════════════════════════════════════════════
+--  PANEL: MARKET
+-- ═══════════════════════════════════════════════════════════
+local MarketPanel=NewPanel("MARKET")
+SecLabel("Open Market / Shop",MarketPanel,10)
+local MktScroll=Make("ScrollingFrame",{Size=UDim2.new(1,0,1,-30),Position=UDim2.new(0,0,0,30),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=3,ScrollBarImageColor3=C.Border,CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollingDirection=Enum.ScrollingDirection.Y},MarketPanel)
+Make("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,6),Parent=MktScroll}); Pad(MktScroll,6,10,12,12)
+local shopIcons={["Bronx Market"]="🛒",["Tattoo Shop"]="🔺",["Open Trunk"]="🚗",["BRONX PAWNING"]="💎",["BRONX CLOTHING"]="👕",["Gas Station"]="⛽",["EXOTIC DEALER"]="🌿"}
+for _,shopName in ipairs(shopList) do
+    local guiName=shopGUIs[shopName]
+    local row=MakeFrame({Size=UDim2.new(1,0,0,44),BackgroundColor3=C.Card,LayoutOrder=1},MktScroll)
+    Corner(row,4); Stroke(row,C.Border,1)
+    local iconLbl=MakeLabel({Size=UDim2.new(0,34,0,34),Position=UDim2.new(0,6,0.5,-17),Text=shopIcons[shopName] or "🏪",TextSize=18,TextXAlignment=Enum.TextXAlignment.Center,BackgroundColor3=Color3.fromRGB(18,18,28),BackgroundTransparency=0},row)
+    Corner(iconLbl,4)
+    MakeLabel({Size=UDim2.new(1,-110,0,18),Position=UDim2.new(0,48,0,6),Text=shopName,TextSize=12,Font=Enum.Font.GothamBold,TextColor3=C.TextPri},row)
+    MakeLabel({Size=UDim2.new(1,-110,0,14),Position=UDim2.new(0,48,0,26),Text="GUI: "..guiName,TextSize=9,Font=Enum.Font.Code,TextColor3=C.TextDim},row)
+    local openBtn=MakeButton({Size=UDim2.new(0,56,0,26),Position=UDim2.new(1,-66,0.5,-13),Text="OPEN",TextSize=10,Font=Enum.Font.GothamBold},row)
+    Corner(openBtn,3); Stroke(openBtn,C.BorderAcc,1)
+    openBtn.MouseEnter:Connect(function() TweenService:Create(openBtn,TweenInfo.new(0.1),{BackgroundColor3=C.Accent,TextColor3=C.White}):Play() end)
+    openBtn.MouseLeave:Connect(function() TweenService:Create(openBtn,TweenInfo.new(0.1),{BackgroundColor3=C.AccentDim,TextColor3=C.Accent}):Play() end)
+    openBtn.MouseButton1Click:Connect(function()
+        local function tryOpen(c)
+            if not c then return false end
+            local gui=c:FindFirstChild(guiName)
+            if gui then gui.Enabled=not gui.Enabled; openBtn.Text=gui.Enabled and "CLOSE" or "OPEN"; openBtn.TextColor3=gui.Enabled and C.Green or C.Accent; return true end
+            return false
+        end
+        if not tryOpen(LocalPlayer:FindFirstChild("PlayerGui")) then
+            if not tryOpen(game:GetService("CoreGui")) then
+                local r=ReplicatedStorage:FindFirstChild("OpenShop") or ReplicatedStorage:FindFirstChild("ShopRemote")
+                if r then pcall(function() r:FireServer(shopName) end) end
+            end
+        end
+    end)
+end
+
+-- ═══════════════════════════════════════════════════════════
+--  PANEL: SETTINGS
+-- ═══════════════════════════════════════════════════════════
+local SettingsPanel=NewPanel("SETTINGS")
+local SScroll=Make("ScrollingFrame",{Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=3,ScrollBarImageColor3=C.Border,CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y},SettingsPanel)
+Make("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,5),Parent=SScroll}); Pad(SScroll,8,10,12,12)
+local function SettingRow(label,sub,ctrlType,default,key)
+    local row=MakeFrame({Size=UDim2.new(1,0,0,42),BackgroundColor3=C.Card,LayoutOrder=1},SScroll)
+    Corner(row,3); Stroke(row,C.Border,1)
+    MakeLabel({Size=UDim2.new(1,-80,0,18),Position=UDim2.new(0,10,0,5),Text=label,TextSize=11,Font=Enum.Font.GothamBold,TextColor3=C.TextSec},row)
+    if sub then MakeLabel({Size=UDim2.new(1,-80,0,13),Position=UDim2.new(0,10,0,23),Text=sub,TextSize=8,Font=Enum.Font.Gotham,TextColor3=C.TextDim},row) end
+    if ctrlType=="toggle" then
+        local tbg=MakeFrame({Size=UDim2.new(0,34,0,18),Position=UDim2.new(1,-44,0.5,-9),BackgroundColor3=default and C.Accent or C.Card},row)
+        Corner(tbg,9); Stroke(tbg,default and C.Accent or C.Border,1)
+        local nub=MakeFrame({Size=UDim2.new(0,12,0,12),Position=default and UDim2.new(1,-15,0.5,-6) or UDim2.new(0,3,0.5,-6),BackgroundColor3=C.White},tbg)
+        Corner(nub,6); local st=default
+        tbg.InputBegan:Connect(function(i)
+            if i.UserInputType==Enum.UserInputType.MouseButton1 then
+                st=not st; CFG[key]=st
+                TweenService:Create(tbg,TweenInfo.new(0.15),{BackgroundColor3=st and C.Accent or C.Card}):Play()
+                TweenService:Create(nub,TweenInfo.new(0.15),{Position=st and UDim2.new(1,-15,0.5,-6) or UDim2.new(0,3,0.5,-6)}):Play()
+            end
+        end)
+    elseif ctrlType=="number" then
+        local inp=MakeInput({Size=UDim2.new(0,62,0,24),Position=UDim2.new(1,-72,0.5,-12),Text=tostring(default),TextXAlignment=Enum.TextXAlignment.Right,ClearTextOnFocus=false},row)
+        Corner(inp,3); Stroke(inp,C.Border,1); Pad(inp,0,0,6,6)
+        inp.FocusLost:Connect(function()
+            local n=tonumber(inp.Text)
+            if n then CFG[key]=n else inp.Text=tostring(CFG[key]) end
+        end)
+    end
+end
+SettingRow("List Delay (s)",     "FireServer on ListWeaponRemote",    "number",0.22,   "ListDelay")
+SettingRow("Store Wait (s)",     "After BackpackRemote Store invoke", "number",3.6,    "StoreWait")
+SettingRow("Cycle Cooldown (s)", "Wait between full dupe cycles",     "number",1.5,    "CycleCooldown")
+SettingRow("List Price",         "Robux price for market listings",   "number",999999, "ListPrice")
+SettingRow("Auto Re-Equip",      "Re-equip masterObject each cycle",  "toggle",true,   "AutoReEquip")
+
+-- ═══════════════════════════════════════════════════════════
+--  PANEL: BLACKLIST
+-- ═══════════════════════════════════════════════════════════
+local BlacklistPanel=NewPanel("BLACKLIST")
+local BLScroll=Make("ScrollingFrame",{Size=UDim2.new(1,0,1,-46),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=3,ScrollBarImageColor3=C.Border,CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y},BlacklistPanel)
+Make("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=BLScroll}); Pad(BLScroll,8,4,12,12)
+local BLAddRow=MakeFrame({Size=UDim2.new(1,0,0,40),Position=UDim2.new(0,0,1,-40),BackgroundColor3=Color3.fromRGB(10,10,14)},BlacklistPanel)
+Stroke(BLAddRow,C.Border,1)
+local BLInput=MakeInput({Size=UDim2.new(1,-74,0,26),Position=UDim2.new(0,10,0.5,-13),PlaceholderText="Item name (exact match)",Text="",TextSize=11,ClearTextOnFocus=false},BLAddRow)
+Corner(BLInput,3); Stroke(BLInput,C.Border,1); Pad(BLInput,0,0,8,8)
+local BLAddBtn=MakeButton({Size=UDim2.new(0,52,0,26),Position=UDim2.new(1,-62,0.5,-13),Text="ADD",TextSize=10,Font=Enum.Font.GothamBold},BLAddRow)
+Corner(BLAddBtn,3); Stroke(BLAddBtn,C.BorderAcc,1)
+local function RenderBL()
+    for _,v in pairs(BLScroll:GetChildren()) do if v:IsA("Frame") then v:Destroy() end end
+    for name in pairs(CFG.Blacklist) do
+        local row=MakeFrame({Size=UDim2.new(1,0,0,30),BackgroundColor3=C.Card,LayoutOrder=1},BLScroll)
+        Corner(row,3); Stroke(row,C.Border,1)
+        MakeFrame({Size=UDim2.new(0,4,0,4),Position=UDim2.new(0,10,0.5,-2),BackgroundColor3=C.Accent},row)
+        MakeLabel({Size=UDim2.new(1,-50,1,0),Position=UDim2.new(0,22,0,0),Text=name,TextSize=11,Font=Enum.Font.GothamBold,TextColor3=C.TextSec},row)
+        local rm=MakeButton({Size=UDim2.new(0,22,0,22),Position=UDim2.new(1,-30,0.5,-11),Text="✕",TextSize=10,BackgroundColor3=C.BG,TextColor3=C.TextDim},row)
+        Corner(rm,3)
+        rm.MouseButton1Click:Connect(function() CFG.Blacklist[name]=nil; RenderBL() end)
+        rm.MouseEnter:Connect(function() rm.TextColor3=C.Accent end)
+        rm.MouseLeave:Connect(function() rm.TextColor3=C.TextDim end)
+    end
+end
+RenderBL()
+BLAddBtn.MouseButton1Click:Connect(function()
+    local v=BLInput.Text:match("^%s*(.-)%s*$")
+    if v and #v>0 then CFG.Blacklist[v]=true; BLInput.Text=""; RenderBL() end
+end)
+
+-- ═══════════════════════════════════════════════════════════
+--  TAB SWITCHING
+-- ═══════════════════════════════════════════════════════════
+local function SwitchTab(name)
+    activeTab=name
+    for n,p in pairs(Panels) do p.Visible=(n==name) end
+    for n,btn in pairs(TabBtns) do
+        btn.TextColor3=n==name and C.Accent or C.TextDim
+        btn.BackgroundColor3=n==name and Color3.fromRGB(30,8,6) or Color3.fromRGB(12,12,16)
+    end
+end
+for name,btn in pairs(TabBtns) do btn.MouseButton1Click:Connect(function() SwitchTab(name) end) end
+SwitchTab("DUPE")
+
+-- ═══════════════════════════════════════════════════════════
+--  DRAG
+-- ═══════════════════════════════════════════════════════════
+do
+    local drag,ds,sp=false,nil,nil
+    TitleBar.InputBegan:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 then drag=true;ds=i.Position;sp=Win.Position end end)
+    UserInputService.InputChanged:Connect(function(i)
+        if drag and i.UserInputType==Enum.UserInputType.MouseMovement then
+            local d=i.Position-ds; Win.Position=UDim2.new(sp.X.Scale,sp.X.Offset+d.X,sp.Y.Scale,sp.Y.Offset+d.Y)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 then drag=false end end)
+end
+
+-- ═══════════════════════════════════════════════════════════
+--  RIGHT SHIFT REFRESH
+-- ═══════════════════════════════════════════════════════════
+UserInputService.InputBegan:Connect(function(input,gp)
+    if gp then return end
+    if input.KeyCode==Enum.KeyCode.RightShift then
+        playerDropdown.refresh()
+        AddLog("info","Refreshed — "..tostring(#buildPlayerList()-1).." player(s)")
+    end
+end)
+
+-- ═══════════════════════════════════════════════════════════
+--  WINDOW CONTROLS
+-- ═══════════════════════════════════════════════════════════
+local minimized=false
+CloseBtn.MouseButton1Click:Connect(function()
+    DupeActive=false; bringOn=false; bringActive=false
+    carFlingOn=false; stopCarFling()
+    setupAdminGuns(false); ScreenGui:Destroy()
+end)
+MinBtn.MouseButton1Click:Connect(function()
+    minimized=not minimized
+    ContentArea.Visible=not minimized; TabBar.Visible=not minimized; StatusBar.Visible=not minimized
+    Win.Size=minimized and UDim2.new(0,WIN_W,0,36) or UDim2.new(0,WIN_W,0,WIN_H)
+end)
+
+-- ═══════════════════════════════════════════════════════════
+--  DUPE ENGINE
+-- ═══════════════════════════════════════════════════════════
+local function SetStatus(running)
+    if running then
+        StatusDot.BackgroundColor3=C.Green; StatusLabel.Text="RUNNING"; StatusLabel.TextColor3=C.Green
+        MainBtn.BackgroundColor3=C.AccentDim; MainBtn.TextColor3=C.Accent; MainBtn.Text="■   STOP DUPE"
+        ItemBadge.Text="RUNNING"; ItemBadge.BackgroundColor3=C.AccentDim; ItemBadge.TextColor3=C.Accent
+    else
+        StatusDot.BackgroundColor3=C.Yellow; StatusLabel.Text="IDLE"; StatusLabel.TextColor3=C.Yellow
+        MainBtn.BackgroundColor3=C.Accent; MainBtn.TextColor3=C.White; MainBtn.Text="▶   START DUPE"
+        ItemBadge.Text="STOPPED"; ItemBadge.BackgroundColor3=Color3.fromRGB(40,10,8); ItemBadge.TextColor3=C.Accent
+    end
+end
+
+local function StartDupe()
+    local char=LocalPlayer.Character
+    local held=char and char:FindFirstChildOfClass("Tool")
+    if not held then AddLog("err","No item equipped"); return end
+    if CFG.Blacklist[held.Name] then AddLog("warn","Blacklisted: "..held.Name); return end
+    DupeActive=true; currentSession=currentSession+1
+    local mySession=currentSession
+    masterObject=held; GhostCache=held
+    previousMarketCount=GetMarketCount(held.Name); totalStored=previousMarketCount
+    dupeBatchCount=0; dupeTimer=0; statCycles=0; sessionStart=tick()
+    ItemNameLabel.Text=held.Name; ItemMetaLabel.Text="Dupe active — cycling"
+    ItemPill.Text=held.Name:upper(); ItemPill.TextColor3=C.TextSec
+    SetStatus(true)
+    AddLog("info","Dupe started — "..held.Name)
+    if SelectedPlayer then AddLog("info","Target: "..SelectedPlayer.Name) end
+    AddLog("ok","ListWeaponRemote hooked")
+
+    task.spawn(function()
+        while DupeActive and mySession==currentSession do
+            task.wait(1); dupeTimer+=1
+            StatValues["runtime"].Text=FormatTime(dupeTimer)
+        end
+    end)
+
+    task.spawn(function()
+        while DupeActive and mySession==currentSession do
+            local char2=LocalPlayer.Character
+            local hum=char2 and char2:FindFirstChildOfClass("Humanoid")
+            local bp=LocalPlayer:FindFirstChild("Backpack")
+            if not char2 or not bp or not hum then task.wait(1) continue end
+            local tool=nil
+            if masterObject and masterObject.Parent then tool=masterObject
+            else
+                local f=bp:FindFirstChild(masterObject.Name) or char2:FindFirstChild(masterObject.Name)
+                if f then masterObject=f; GhostCache=f; tool=f end
+            end
+            if tool and not CFG.Blacklist[tool.Name] then
+                GhostCache=tool
+                local tn=tool.Name
+                if tool.Parent==char2 then tool.Parent=bp; task.wait(0.2) end
+                pcall(function() if ListWeaponRemote then ListWeaponRemote:FireServer(tn,CFG.ListPrice) end end)
+                task.wait(CFG.ListDelay)
+                pcall(function() if BackpackRemote then BackpackRemote:InvokeServer("Store",tn) end end)
+                task.wait(CFG.StoreWait)
+                pcall(function() if BackpackRemote then BackpackRemote:InvokeServer("Grab",tn) end end)
+                task.wait(CFG.GrabWait)
+                RestoreGhostItems()
+                task.wait(CFG.GrabWait)
+                local curMkt=GetMarketCount(tn)
+                if curMkt>previousMarketCount then
+                    local added=curMkt-previousMarketCount
+                    dupeBatchCount+=added; totalStored+=added; statCycles+=1
+                    StatValues["stored"].Text=tostring(totalStored)
+                    StatValues["cycles"].Text=tostring(statCycles)
+                    CountLabel.Text="STORED: "..totalStored
+                    AddLog("ok","Cycle "..statCycles.." — ×"..added.." "..tn)
+                    local mkt=ReplicatedStorage:FindFirstChild("MarketItems")
+                    if mkt then
+                        for _,item in ipairs(mkt:GetChildren()) do
+                            if item.Name==tn and item:FindFirstChild("owner") and item.owner.Value==LocalPlayer.Name then
+                                local id=item:GetAttribute("SpecialId") or item:GetAttribute("UUID")
+                                if id and not PERMANENT_IDS[id] then PERMANENT_IDS[id]=true end
+                            end
+                        end
+                    end
+                    previousMarketCount=curMkt
+                else
+                    statCycles+=1; StatValues["cycles"].Text=tostring(statCycles)
+                    AddLog("warn","Cycle "..statCycles.." — market unchanged")
+                end
+                local cc=GetItemCount(tn)
+                if cc>=2 then
+                    for _,v in pairs(bp:GetChildren()) do
+                        if v:IsA("Tool") and v.Name==tn and v~=masterObject then v:Destroy(); break end
+                    end
+                    if CFG.AutoReEquip and masterObject and masterObject.Parent then
+                        if masterObject.Parent~=char2 then hum:EquipTool(masterObject) end
+                    end
+                    task.wait(CFG.EquipWait)
+                elseif cc==1 then
+                    if CFG.AutoReEquip then
+                        if masterObject and masterObject.Parent then
+                            if masterObject.Parent~=char2 then hum:EquipTool(masterObject) end
+                        else
+                            local f=bp:FindFirstChild(tn) or char2:FindFirstChild(tn)
+                            if f then masterObject=f;GhostCache=f;hum:EquipTool(f) end
+                        end
+                    end
+                    task.wait(CFG.EquipWait)
+                elseif cc==0 then
+                    pcall(function() if BackpackRemote then BackpackRemote:InvokeServer("Grab",tn) end end)
+                    task.wait(CFG.EquipWait)
+                    local nc=GetItemCount(tn)
+                    if nc>=1 then
+                        local f=bp:FindFirstChild(tn) or char2:FindFirstChild(tn)
+                        if f then masterObject=f;GhostCache=f;hum:EquipTool(f) end
+                    end
+                    task.wait(CFG.EquipWait)
+                end
+                totalStored=GetMarketCount(tn)
+                task.wait(CFG.CycleCooldown)
+            else
+                task.wait(1)
+            end
+        end
+    end)
+end
+
+local function StopDupe()
+    DupeActive=false; currentSession=currentSession+1
+    SetStatus(false)
+    AddLog("warn","Dupe stopped — "..totalStored.." stored")
+end
+
+MainBtn.MouseButton1Click:Connect(function()
+    if not DupeActive then StartDupe() else StopDupe() end
+end)
+MainBtn.MouseEnter:Connect(function()
+    if not DupeActive then TweenService:Create(MainBtn,TweenInfo.new(0.12),{BackgroundColor3=Color3.fromRGB(255,64,51)}):Play() end
+end)
+MainBtn.MouseLeave:Connect(function()
+    if not DupeActive then TweenService:Create(MainBtn,TweenInfo.new(0.12),{BackgroundColor3=C.Accent}):Play() end
+end)
