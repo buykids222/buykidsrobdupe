@@ -2,6 +2,7 @@ local KEYS = {
     "BUYKIDS-dupe-001",
     "BUYKIDS-dupe-002",
     "BUYKIDS-dupe-003",
+"BUYKIDS-dupe-004",
     -- add more as you hand them out
 }
 
